@@ -1,194 +1,179 @@
-"""Quick start script for testing the pipeline."""
+"""Quick-start helper for the refactored speech pipeline.
 
+The script walks through:
+1. Verifying runtime prerequisites (Python modules + Hugging Face token).
+2. Loading the new end-to-end pipeline that performs diarization, Whisper
+   transcription, and merged caption generation.
+3. Running a miniature demo that shows sentence-level speaker turns produced by
+   the unified merge logic.
+
+Run it with: ``uv run python quickstart.py``
+"""
+
+from __future__ import annotations
+
+import logging
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
-import tempfile
-import logging
+from tempfile import TemporaryDirectory
+from typing import Iterable
 
-# Add the project root to Python path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+# Ensure the package can be imported when running the file directly.
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from speech_pipeline import Config
+from speech_pipeline import Config, SpeechPipeline
+from speech_pipeline.models import SpeakerSegment
 
-logging.basicConfig(level=logging.INFO)
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-def check_requirements():
-    """Check if all requirements are installed."""
+def check_dependencies() -> bool:
+    """Confirm that the runtime has all critical third-party packages."""
+
     try:
-        import torch
-        import faster_whisper
-        import pyannote.audio
-        import librosa
-        import soundfile
-        import pydub
-        import numpy as np
-        logger.info("✅ All core dependencies are available")
-        return True
-    except ImportError as e:
-        logger.error(f"❌ Missing dependency: {e}")
+        import torch  # noqa: F401
+        import faster_whisper  # noqa: F401
+        import pyannote.audio  # noqa: F401
+        import librosa  # noqa: F401
+        import soundfile  # noqa: F401
+        import pydub  # noqa: F401
+        import numpy as np  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - user environment check
+        logger.error("❌ Missing dependency: %s", exc)
+        logger.info("   Install everything with: uv pip install -e .")
         return False
 
+    logger.info("✅ Dependencies imported successfully.")
+    return True
 
-def check_configuration():
-    """Check if configuration is valid."""
+
+def load_configuration() -> Config | None:
+    """Load and validate configuration from the environment."""
+
     try:
         config = Config.from_env()
         config.validate()
-        logger.info("✅ Configuration is valid")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Configuration error: {e}")
-        return False
-
-
-def check_models():
-    """Check if models can be loaded."""
-    try:
-        from speech_pipeline import SpeechPipeline
-        
-        logger.info("🔄 Loading models (this may take a while)...")
-        config = Config.from_env()
-        config.whisper_model = "tiny"  # Use smallest model for testing
-        
-        pipeline = SpeechPipeline(config=config)
-        logger.info("✅ Models loaded successfully")
-        
-        # Get model info
-        info = pipeline.get_model_info()
-        logger.info(f"📊 Whisper model: {info['whisper_model']}")
-        logger.info(f"📊 Pyannote model: {info['pyannote_model']}")
-        logger.info(f"📊 Device: {info['device']}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"❌ Model loading error: {e}")
-        return False
-
-
-def create_test_audio():
-    """Create a simple test audio file."""
-    try:
-        import numpy as np
-        import soundfile as sf
-        
-        # Generate 5 seconds of test audio with two different frequencies
-        sample_rate = 16000
-        duration = 5
-        t = np.linspace(0, duration, sample_rate * duration)
-        
-        # Create audio with two distinct parts (simulating different speakers)
-        audio1 = 0.3 * np.sin(2 * np.pi * 440 * t[:sample_rate * 2])  # 2 seconds at 440Hz
-        audio2 = 0.3 * np.sin(2 * np.pi * 880 * t[:sample_rate * 3])  # 3 seconds at 880Hz
-        
-        test_audio = np.concatenate([audio1, audio2])
-        
-        test_file = "test_audio.wav"
-        sf.write(test_file, test_audio, sample_rate)
-        
-        logger.info(f"✅ Created test audio file: {test_file}")
-        return test_file
-    except Exception as e:
-        logger.error(f"❌ Failed to create test audio: {e}")
+    except Exception as exc:  # pragma: no cover - configuration guard
+        logger.error("❌ Configuration error: %s", exc)
+        logger.info("   Check that HUGGINGFACE_TOKEN and OUTPUT_FORMAT are defined in your .env file.")
         return None
 
+    logger.info("✅ Configuration loaded for Whisper '%s' and pyannote '%s'.",
+                config.whisper_model, config.pyannote_model)
+    return config
 
-def run_test_pipeline(audio_file):
-    """Run a test with the pipeline."""
+
+def bootstrap_pipeline(base_config: Config) -> SpeechPipeline | None:
+    """Initialise the speech pipeline with light-weight models for demo use."""
+
+    demo_config = Config(**vars(base_config))
+    demo_config.whisper_model = os.getenv("QUICKSTART_WHISPER_MODEL", "tiny")
+
     try:
-        from speech_pipeline import SpeechPipeline
-        
-        logger.info("🔄 Running test transcription...")
-        
-        config = Config.from_env()
-        config.whisper_model = "tiny"  # Use smallest model for testing
-        
-        pipeline = SpeechPipeline(config=config)
-        
-        result = pipeline.process(
-            audio_file,
-            output_path="test_output.srt",
-            output_format="srt"
-        )
-        
-        logger.info("✅ Test transcription completed")
-        logger.info(f"📊 Duration: {result.total_duration:.2f}s")
-        logger.info(f"📊 Speakers: {len(result.speakers)}")
-        logger.info(f"📊 Segments: {len(result.segments)}")
-        
-        # Show sample output
-        srt_content = result.to_srt()
-        logger.info("📄 Sample SRT output:")
-        logger.info(srt_content[:200] + "..." if len(srt_content) > 200 else srt_content)
-        
-        return True
-    except Exception as e:
-        logger.error(f"❌ Test pipeline failed: {e}")
-        return False
+        pipeline = SpeechPipeline(config=demo_config)
+    except Exception as exc:  # pragma: no cover - heavy initialisation guard
+        logger.error("❌ Failed to load models: %s", exc)
+        logger.info("   Confirm your Hugging Face token has access to %s.",
+                    demo_config.pyannote_model)
+        return None
+
+    info = pipeline.get_model_info()
+    logger.info("✅ Pipeline ready on '%s' (Whisper=%s, Pyannote=%s).",
+                info["device"], info["whisper_model"], info["pyannote_model"])
+    return pipeline
 
 
-def cleanup():
-    """Clean up test files."""
-    test_files = ["test_audio.wav", "test_output.srt"]
-    for file in test_files:
-        if os.path.exists(file):
-            os.remove(file)
-            logger.info(f"🧹 Cleaned up {file}")
+def generate_demo_audio(destination: Path) -> Path:
+    """Synthesize a short demo waveform with two pseudo-speakers."""
+
+    import numpy as np
+    import soundfile as sf
+
+    sample_rate = 16000
+    seconds = 6
+    t = np.linspace(0, seconds, sample_rate * seconds, endpoint=False)
+
+    speaker_a = 0.25 * np.sin(2 * np.pi * 220 * t[: sample_rate * 3])
+    speaker_b = 0.25 * np.sin(2 * np.pi * 660 * t[: sample_rate * 3])
+    fade = np.linspace(0.0, 1.0, sample_rate)
+
+    track = np.concatenate([
+        speaker_a,
+        fade * speaker_b[:sample_rate] + (1 - fade) * speaker_a[:sample_rate],
+        speaker_b[sample_rate:],
+    ])
+
+    file_path = destination / "quickstart-demo.wav"
+    sf.write(file_path, track.astype("float32"), sample_rate)
+
+    logger.info("✅ Demo audio created at %s (%.1f seconds).", file_path, seconds)
+    return file_path
 
 
-def main():
-    """Run quick start tests."""
-    logger.info("🚀 Speech Pipeline Quick Start Test")
-    logger.info("=" * 50)
-    
-    all_passed = True
-    
-    # Check 1: Requirements
-    logger.info("\n1. Checking requirements...")
-    if not check_requirements():
-        all_passed = False
-        logger.error("Please install dependencies with: uv pip install -e .")
-    
-    # Check 2: Configuration
-    logger.info("\n2. Checking configuration...")
-    if not check_configuration():
-        all_passed = False
-        logger.error("Please set up your .env file with HUGGINGFACE_TOKEN")
-    
-    if not all_passed:
-        logger.error("\n❌ Pre-flight checks failed. Please fix the issues above.")
+def print_segment_overview(segments: Iterable[SpeakerSegment]) -> None:
+    """Pretty-print merged speaker turns produced by the pipeline."""
+
+    logger.info("\n🗒️  Merged caption preview:")
+    for index, segment in enumerate(segments, start=1):
+        start = segment.start
+        end = segment.end
+        text = segment.text or "[no transcription]"
+        confidence = f"{segment.confidence:.2f}" if segment.confidence is not None else "--"
+        logger.info("%2d. %s | %6.2fs → %6.2fs | conf=%s\n    %s",
+                    index, segment.speaker, start, end, confidence, text)
+
+
+def run_demo(pipeline: SpeechPipeline, tmp_dir: Path) -> None:
+    """Execute the pipeline on generated audio and summarise the outcome."""
+
+    demo_audio = generate_demo_audio(tmp_dir)
+    output_file = tmp_dir / "quickstart-output.srt"
+
+    result = pipeline.process(
+        str(demo_audio),
+        output_path=str(output_file),
+        output_format="srt",
+    )
+
+    logger.info("\n✅ Transcription finished: %.2fs total, %d speakers, %d caption blocks.",
+                result.total_duration, len(result.speakers), len(result.segments))
+    print_segment_overview(result.segments[:5])
+
+    logger.info("\n📄 Full SRT saved to: %s", output_file)
+
+
+def main() -> None:
+    logger.info("🚀 Speech Pipeline Quickstart")
+    logger.info("=" * 60)
+
+    if not check_dependencies():
         return
-    
-    # Check 3: Model loading (optional for quick test)
-    logger.info("\n3. Testing model loading...")
-    models_ok = check_models()
-    
-    # Check 4: Create test audio
-    logger.info("\n4. Creating test audio...")
-    test_audio = create_test_audio()
-    
-    if test_audio and models_ok:
-        # Check 5: Run pipeline test
-        logger.info("\n5. Testing pipeline...")
-        run_test_pipeline(test_audio)
-    
-    # Cleanup
-    logger.info("\n6. Cleaning up...")
-    cleanup()
-    
-    if all_passed and models_ok:
-        logger.info("\n🎉 All tests passed! Your pipeline is ready to use.")
-        logger.info("\nNext steps:")
-        logger.info("1. Place your audio files in the project directory")
-        logger.info("2. Run: speech-pipeline process your_audio.wav")
-        logger.info("3. Check the output files")
-    else:
-        logger.info("\n⚠️ Some tests failed, but basic setup is working.")
-        logger.info("You can still use the pipeline with your own audio files.")
+
+    config = load_configuration()
+    if config is None:
+        return
+
+    pipeline = bootstrap_pipeline(config)
+    if pipeline is None:
+        return
+
+    with TemporaryDirectory(prefix="speech-pipeline-quickstart-") as tmp:
+        tmp_path = Path(tmp)
+        run_demo(pipeline, tmp_path)
+
+        logger.info("\n🧪 Temporary assets kept in %s while the script is running.", tmp_path)
+
+    logger.info("\n✨ Done. Replace the demo file with your own audio and run either:")
+    logger.info("   uv run speech-pipeline process your_audio.wav --output subtitles.srt")
+    logger.info("or call the pipeline from Python just like in run_demo().")
 
 
 if __name__ == "__main__":
-    main()
+    with suppress(KeyboardInterrupt):
+        main()

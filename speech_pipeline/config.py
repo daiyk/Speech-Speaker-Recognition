@@ -40,7 +40,7 @@ class Config:
         
         return cls(
             huggingface_token=os.getenv("HUGGINGFACE_TOKEN"),
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            openai_api_key=os.getenv("OPENAI_API_KEY", None),
             whisper_model=os.getenv("WHISPER_MODEL", "base"),
             pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1"),
             output_format=os.getenv("OUTPUT_FORMAT", "srt"),

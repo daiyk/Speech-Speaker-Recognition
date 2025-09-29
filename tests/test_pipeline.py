@@ -204,15 +204,17 @@ class TestSpeechPipeline:
         config.whisper_model = "base"
         return config
     
-    @patch('speech_pipeline.pipeline.whisper')
-    @patch('speech_pipeline.pipeline.PyannnotePipeline')
-    def test_pipeline_initialization(self, mock_pyannote, mock_whisper, mock_config):
+    @patch('speech_pipeline.pipeline.PyannnotePipeline.from_pretrained')
+    @patch('speech_pipeline.pipeline.WhisperModel')
+    def test_pipeline_initialization(self, mock_whisper_cls, mock_pyannote_from_pretrained, mock_config):
         """Test pipeline initialization."""
         from speech_pipeline.pipeline import SpeechPipeline
         
         # Mock the models
-        mock_whisper.load_model.return_value = Mock()
-        mock_pyannote.from_pretrained.return_value = Mock()
+        mock_whisper_instance = Mock()
+        mock_whisper_instance.transcribe.return_value = ([], {})
+        mock_whisper_cls.return_value = mock_whisper_instance
+        mock_pyannote_from_pretrained.return_value = Mock()
         
         pipeline = SpeechPipeline(config=mock_config)
         
@@ -222,8 +224,12 @@ class TestSpeechPipeline:
     
     def test_get_model_info(self, mock_config):
         """Test model information retrieval."""
-        with patch('speech_pipeline.pipeline.whisper'), \
-             patch('speech_pipeline.pipeline.PyannnotePipeline'):
+        with patch('speech_pipeline.pipeline.WhisperModel') as mock_whisper_cls, \
+             patch('speech_pipeline.pipeline.PyannnotePipeline.from_pretrained') as mock_pyannote_from_pretrained:
+            mock_whisper_instance = Mock()
+            mock_whisper_instance.transcribe.return_value = ([], {})
+            mock_whisper_cls.return_value = mock_whisper_instance
+            mock_pyannote_from_pretrained.return_value = Mock()
             
             from speech_pipeline.pipeline import SpeechPipeline
             pipeline = SpeechPipeline(config=mock_config)
