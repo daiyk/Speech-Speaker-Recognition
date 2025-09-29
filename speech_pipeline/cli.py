@@ -38,6 +38,12 @@ def cli(verbose: bool, quiet: bool) -> None:
 @click.option('--whisper-model', '-w', 
               type=click.Choice(['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3']),
               default='base', help='Whisper model to use')
+@click.option('--pyannote-model', 
+              type=str,
+              help='Pyannote diarization model to use (overrides config)')
+@click.option('--speaker-label-prefix', '--speaker-label',
+              type=str,
+              help='Prefix for speaker labels (default: value from config)')
 @click.option('--min-speakers', type=int, help='Minimum number of speakers')
 @click.option('--max-speakers', type=int, help='Maximum number of speakers')
 @click.option('--device', type=click.Choice(['cpu', 'cuda', 'mps']), 
@@ -49,6 +55,8 @@ def process(
     output: Optional[Path],
     output_format: str,
     whisper_model: str,
+    pyannote_model: Optional[str],
+    speaker_label_prefix: Optional[str],
     min_speakers: Optional[int],
     max_speakers: Optional[int],
     device: Optional[str],
@@ -65,12 +73,17 @@ def process(
         # Override config with command-line options
         pipeline_config.whisper_model = whisper_model
         pipeline_config.output_format = output_format
+        if pyannote_model:
+            pipeline_config.pyannote_model = pyannote_model
+        if speaker_label_prefix:
+            pipeline_config.speaker_labels = speaker_label_prefix
         
         # Initialize pipeline
         logger.info("Initializing speech pipeline...")
         pipeline = SpeechPipeline(
             config=pipeline_config,
-            device=device
+            device=device,
+            pyannote_model=pyannote_model
         )
         
         # Determine output path
@@ -91,6 +104,8 @@ def process(
         click.echo(f"\n✅ Processing completed!")
         click.echo(f"📁 Input: {input_file}")
         click.echo(f"📄 Output: {output}")
+        click.echo(f"🤖 Whisper model: {pipeline.config.whisper_model}")
+        click.echo(f"🎭 Pyannote model: {pipeline.config.pyannote_model}")
         click.echo(f"⏱️  Duration: {result.total_duration:.2f}s")
         click.echo(f"👥 Speakers: {len(result.speakers)}")
         
@@ -159,9 +174,10 @@ def setup() -> None:
     click.echo("🚀 Speech Pipeline Setup Guide")
     click.echo("=" * 40)
     
-    click.echo("\n1. Install dependencies:")
-    click.echo("   uv pip install -e .")
-    
+    click.echo("\n1. Sync dependencies (creates .venv automatically):")
+    click.echo("   uv sync")
+    click.echo("   uv sync --group dev  # optional: add developer tools")
+
     click.echo("\n2. Get Hugging Face token:")
     click.echo("   • Go to https://huggingface.co/")
     click.echo("   • Create account and get access token")
@@ -172,11 +188,12 @@ def setup() -> None:
     click.echo("   # Edit .env and add your HUGGINGFACE_TOKEN")
     
     click.echo("\n4. Test installation:")
-    click.echo("   speech-pipeline models")
-    click.echo("   speech-pipeline info your_audio_file.wav")
+    click.echo("   uv run speech-pipeline models")
+    click.echo("   uv run speech-pipeline info your_audio_file.wav")
     
     click.echo("\n5. Process audio:")
-    click.echo("   speech-pipeline process input.wav --output output.srt")
+    click.echo("   uv run speech-pipeline process input.wav --output output.srt")
+    click.echo("   # Or try the demo: uv run python quickstart.py --demo")
     
     click.echo("\n📚 For more info, see README.md")
 

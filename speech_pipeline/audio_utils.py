@@ -40,8 +40,9 @@ class AudioProcessor:
                 sr=self.sample_rate,
                 mono=True
             )
-            logger.info(f"Loaded audio: {audio_file.name} ({len(audio_data)/sr:.2f}s)")
-            return audio_data, sr
+            effective_sr = int(sr)
+            logger.info(f"Loaded audio: {audio_file.name} ({len(audio_data)/effective_sr:.2f}s)")
+            return audio_data, effective_sr
             
         except Exception as e:
             logger.warning(f"librosa failed to load {audio_path}: {e}")
