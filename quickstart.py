@@ -1,17 +1,18 @@
 """Quick-start helper for the refactored speech pipeline.
 
-The script walks through:
-1. Verifying runtime prerequisites (Python modules + Hugging Face token).
-2. Loading the new end-to-end pipeline that performs diarization, Whisper
-   transcription, and merged caption generation.
-3. Running a miniature demo that shows sentence-level speaker turns produced by
-   the unified merge logic.
+The script now supports two modes:
+1. Pipeline mode (default): verify the runtime, load configured models, and
+    process a user-supplied audio file end-to-end.
+2. Demo mode (``-demo``): spin up lightweight models and run against a
+    synthesized six-second audio clip to showcase diarization and captions.
 
-Run it with: ``uv run python quickstart.py``
+Run it with: ``uv run python quickstart.py <audio-file>`` or add ``-demo`` to try the
+synthetic sample.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -31,6 +32,39 @@ from speech_pipeline.models import SpeakerSegment
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for the quickstart script."""
+
+    parser = argparse.ArgumentParser(
+        description="Run the speech pipeline on your audio or a built-in demo clip.",
+    )
+    parser.add_argument(
+        "input",
+        nargs="?",
+        help="Path to an audio file. Required unless -demo/--demo is specified.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Destination file for the transcript. Defaults to <input>.<format>.",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["srt", "vtt", "json"],
+        help="Override the configured output format.",
+    )
+    parser.add_argument(
+        "-demo",
+        "--demo",
+        action="store_true",
+        help="Run the built-in six-second demo instead of your audio file.",
+    )
+
+    args_list = list(argv) if argv is not None else None
+    return parser.parse_args(args_list)
 
 
 def check_dependencies() -> bool:
@@ -69,18 +103,22 @@ def load_configuration() -> Config | None:
     return config
 
 
-def bootstrap_pipeline(base_config: Config) -> SpeechPipeline | None:
-    """Initialise the speech pipeline with light-weight models for demo use."""
+def bootstrap_pipeline(base_config: Config, demo_mode: bool) -> SpeechPipeline | None:
+    """Initialise the speech pipeline, optionally using lightweight demo models."""
 
-    demo_config = Config(**vars(base_config))
-    demo_config.whisper_model = os.getenv("QUICKSTART_WHISPER_MODEL", "tiny")
+    effective_config = Config(**vars(base_config))
+    if demo_mode:
+        effective_config.whisper_model = os.getenv("QUICKSTART_WHISPER_MODEL", "tiny")
+        logger.info("🎯 Demo mode: forcing Whisper model '%s'.", effective_config.whisper_model)
+    else:
+        logger.info("🎯 Using configured Whisper model '%s'.", effective_config.whisper_model)
 
     try:
-        pipeline = SpeechPipeline(config=demo_config)
+        pipeline = SpeechPipeline(config=effective_config)
     except Exception as exc:  # pragma: no cover - heavy initialisation guard
         logger.error("❌ Failed to load models: %s", exc)
         logger.info("   Confirm your Hugging Face token has access to %s.",
-                    demo_config.pyannote_model)
+                    effective_config.pyannote_model)
         return None
 
     info = pipeline.get_model_info()
@@ -119,8 +157,13 @@ def generate_demo_audio(destination: Path) -> Path:
 def print_segment_overview(segments: Iterable[SpeakerSegment]) -> None:
     """Pretty-print merged speaker turns produced by the pipeline."""
 
+    segment_list = list(segments)
     logger.info("\n🗒️  Merged caption preview:")
-    for index, segment in enumerate(segments, start=1):
+    if not segment_list:
+        logger.info("   [no segments returned]")
+        return
+
+    for index, segment in enumerate(segment_list, start=1):
         start = segment.start
         end = segment.end
         text = segment.text or "[no transcription]"
@@ -148,9 +191,32 @@ def run_demo(pipeline: SpeechPipeline, tmp_dir: Path) -> None:
     logger.info("\n📄 Full SRT saved to: %s", output_file)
 
 
-def main() -> None:
+def run_pipeline(pipeline: SpeechPipeline, audio_path: Path, output_path: Path, output_format: str) -> None:
+    """Execute the pipeline on user audio and summarise the outcome."""
+
+    result = pipeline.process(
+        str(audio_path),
+        output_path=str(output_path),
+        output_format=output_format,
+    )
+
+    logger.info("\n✅ Transcription finished: %.2fs total, %d speakers, %d caption blocks.",
+                result.total_duration, len(result.speakers), len(result.segments))
+    print_segment_overview(result.segments[:5])
+
+    logger.info("\n📄 Full %s saved to: %s", output_format, output_path)
+
+
+def main(argv: Iterable[str] | None = None) -> None:
+    args = parse_args(argv)
+
     logger.info("🚀 Speech Pipeline Quickstart")
     logger.info("=" * 60)
+
+    if args.demo:
+        logger.info("🧪 Demo mode enabled: generating synthetic audio sample.")
+    else:
+        logger.info("🎧 Processing user-supplied audio input.")
 
     if not check_dependencies():
         return
@@ -159,19 +225,43 @@ def main() -> None:
     if config is None:
         return
 
-    pipeline = bootstrap_pipeline(config)
+    pipeline = bootstrap_pipeline(config, demo_mode=args.demo)
     if pipeline is None:
         return
 
-    with TemporaryDirectory(prefix="speech-pipeline-quickstart-") as tmp:
-        tmp_path = Path(tmp)
-        run_demo(pipeline, tmp_path)
+    if args.demo:
+        with TemporaryDirectory(prefix="speech-pipeline-quickstart-") as tmp:
+            tmp_path = Path(tmp)
+            run_demo(pipeline, tmp_path)
 
-        logger.info("\n🧪 Temporary assets kept in %s while the script is running.", tmp_path)
+            logger.info("\n🧪 Temporary assets kept in %s while the script is running.", tmp_path)
 
-    logger.info("\n✨ Done. Replace the demo file with your own audio and run either:")
-    logger.info("   uv run speech-pipeline process your_audio.wav --output subtitles.srt")
-    logger.info("or call the pipeline from Python just like in run_demo().")
+        logger.info("\n✨ Demo complete. Supply an audio file instead of -demo to process your own content.")
+        return
+
+    if args.input is None:
+        logger.error("❌ No input audio provided. Pass a file path or use -demo for the synthetic example.")
+        return
+
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        logger.error("❌ Input audio not found at %s", input_path)
+        return
+
+    output_format = args.format or config.output_format
+    output_path = (
+        Path(args.output).expanduser()
+        if args.output
+        else input_path.with_suffix(f".{output_format}")
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("🔊 Input audio: %s", input_path)
+    logger.info("📝 Output file: %s (%s)", output_path, output_format)
+
+    run_pipeline(pipeline, input_path, output_path, output_format)
+
+    logger.info("\n✨ Done. Re-run with -demo to generate the quick sample, or adjust -f/-o for different outputs.")
 
 
 if __name__ == "__main__":

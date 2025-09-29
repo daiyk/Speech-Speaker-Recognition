@@ -6,6 +6,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+
+def _mps_available() -> bool:
+    """Return True if PyTorch MPS backend is available."""
+
+    return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+
 try:
     import torch
     from faster_whisper import WhisperModel
@@ -45,26 +51,35 @@ class SpeechPipeline:
             device: Device to run models on ('cpu', 'cuda', 'mps')
         """
         self.config = config or Config.from_env()
-        
+
         # Override model names if provided
         if whisper_model:
             self.config.whisper_model = whisper_model
         if pyannote_model:
             self.config.pyannote_model = pyannote_model
-        
+
         # Validate configuration
         self.config.validate()
-        
+
         # Set device
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda"
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.device = "mps"
+                resolved_device = "cuda"
+            elif _mps_available():
+                resolved_device = "mps"
             else:
-                self.device = "cpu"
+                resolved_device = "cpu"
         else:
-            self.device = device
+            resolved_device = device.lower()
+
+        if resolved_device == "cuda" and not torch.cuda.is_available():
+            raise ValueError("CUDA device requested but torch.cuda.is_available() returned False.")
+        if resolved_device == "mps" and not _mps_available():
+            raise ValueError("MPS device requested but torch.backends.mps.is_available() returned False.")
+        if resolved_device not in {"cpu", "cuda", "mps"}:
+            raise ValueError(f"Unsupported device '{resolved_device}'. Choose from 'cpu', 'cuda', or 'mps'.")
+
+        self.device = resolved_device
         
         logger.info(f"Using device: {self.device}")
         
@@ -84,12 +99,18 @@ class SpeechPipeline:
         try:
             logger.info(f"Loading Faster Whisper model: {self.config.whisper_model}")
             # faster-whisper uses different device specification
-            device = "cuda" if self.device == "cuda" else "cpu"
-            # Use int8 for faster inference (2x speed) or float32 for best accuracy
-            compute_type = "int8" if device == "cpu" else "float16"
+            if self.device == "cuda":
+                whisper_device = "cuda"
+                compute_type = "float16"
+            else:
+                whisper_device = "cpu"
+                compute_type = "int8"
+                if self.device == "mps":
+                    logger.info("MPS selected: Whisper will run on CPU backend (faster-whisper currently lacks native MPS support).")
+
             self.whisper_model = WhisperModel(
                 self.config.whisper_model,
-                device=device,
+                device=whisper_device,
                 compute_type=compute_type
             )
             logger.info("Faster Whisper model loaded successfully")
@@ -105,8 +126,11 @@ class SpeechPipeline:
             )
             
             # Move to device if CUDA is available
-            if self.device == "cuda" and self.diarization_pipeline is not None:
-                self.diarization_pipeline = self.diarization_pipeline.to(torch.device("cuda"))
+            if self.diarization_pipeline is not None and hasattr(self.diarization_pipeline, "to"):
+                if self.device == "cuda":
+                    self.diarization_pipeline = self.diarization_pipeline.to(torch.device("cuda"))
+                elif self.device == "mps":
+                    self.diarization_pipeline = self.diarization_pipeline.to(torch.device("mps"))
             
             logger.info("Pyannote model loaded successfully")
         except Exception as e:
