@@ -15,6 +15,10 @@ def _mps_available() -> bool:
 
 try:
     import torch
+    # disable tf32 to suppress pyannote warnings
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     from faster_whisper import WhisperModel
     from pyannote.audio import Pipeline as PyannnotePipeline
     from pyannote.core import Annotation, Segment
@@ -357,7 +361,7 @@ class SpeechPipeline:
         self,
         diarization: Annotation,
         whisper_segments: List[Dict[str, Any]],
-        max_gap: float = 0.75,
+        max_gap: float = 10.0,
     ) -> List[SpeakerSegment]:
         """
         Perform word-level speaker attribution, then regroup contiguous
@@ -444,12 +448,43 @@ class SpeechPipeline:
             start = buffer[0]["start"]
             end = buffer[-1]["end"]
             speaker_raw = buffer[0]["speaker"]
-            # Join words; if any token was segment-level fallback, keep its full text
-            if any(tok.get("_segment_level") for tok in buffer):
-                text_fragments = [tok["text"] for tok in buffer if tok["text"]]
+            
+            # Smart text joining: handle segment-level vs word-level tokens differently
+            text_fragments = []
+            for tok in buffer:
+                if not tok["text"]:
+                    continue
+                text_fragments.append(tok["text"])
+            
+            # Join text intelligently
+            if not text_fragments:
+                text = None
+            elif len(text_fragments) == 1:
+                # Single fragment - use as-is
+                text = text_fragments[0].strip()
             else:
-                text_fragments = [tok["text"] for tok in buffer]
-            text = " ".join(text_fragments).strip()
+                # Multiple fragments - join with smart spacing
+                result = []
+                for i, fragment in enumerate(text_fragments):
+                    fragment = fragment.strip()
+                    if not fragment:
+                        continue
+                    
+                    # Add space before fragment unless:
+                    # 1. It's the first fragment, OR
+                    # 2. Previous fragment ends with whitespace, OR
+                    # 3. Current fragment starts with punctuation that doesn't need leading space
+                    if result:
+                        prev_ends_with_space = result[-1][-1:].isspace()
+                        cur_starts_with_no_space_punct = fragment[0] in ".,;:!?)]}\"'"
+                        
+                        if not prev_ends_with_space and not cur_starts_with_no_space_punct:
+                            result.append(" ")
+                    
+                    result.append(fragment)
+                
+                text = "".join(result)
+            
             probs = [t["prob"] for t in buffer if t.get("prob") is not None]
             confidence = sum(probs) / len(probs) if probs else None
             grouped.append(
@@ -457,7 +492,7 @@ class SpeechPipeline:
                     start=start,
                     end=end,
                     speaker=speaker_raw,
-                    text=text or None,
+                    text=text,
                     confidence=confidence,
                 )
             )
