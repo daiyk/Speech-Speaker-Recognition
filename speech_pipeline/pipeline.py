@@ -13,14 +13,33 @@ def _mps_available() -> bool:
 
     return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
 
+
+def _check_ffmpeg() -> bool:
+    """Check if ffmpeg is available in system PATH."""
+    import subprocess
+    import sys
+    
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 try:
     import torch
-    from faster_whisper import WhisperModel
+    import whisper
     from pyannote.audio import Pipeline as PyannnotePipeline
     from pyannote.core import Annotation, Segment
 
     # Filter out repetitive deprecation warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning) 
+    # disable tf32 to suppress pyannote warnings
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
 except ImportError as e:
     raise ImportError(
         "Required dependencies not installed. Please run: "
@@ -87,6 +106,24 @@ class SpeechPipeline:
         
         logger.info(f"Using device: {self.device}")
         
+        # Check ffmpeg availability (required for Whisper)
+        if not _check_ffmpeg():
+            error_msg = (
+                "ffmpeg is not installed or not found in system PATH. "
+                "Please install ffmpeg to use Whisper for audio transcription.\n"
+                "Installation instructions:\n"
+                "  - Ubuntu/Debian: sudo apt install ffmpeg\n"
+                "  - macOS (Homebrew): brew install ffmpeg\n"
+                "  - Windows: Download from https://ffmpeg.org/download.html and add to PATH"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(
+                "ffmpeg not found. Please install ffmpeg to use Whisper for audio transcription. "
+                "See the instructions above."
+            )
+        
+        logger.info("ffmpeg found and available")
+        
         # Initialize components
         self.audio_processor = AudioProcessor(sample_rate=self.config.sample_rate)
         self.whisper_model: Optional[Any] = None
@@ -99,27 +136,16 @@ class SpeechPipeline:
         """Load Whisper and pyannote models."""
         logger.info("Loading models...")
         
-        # Load Faster Whisper model
+        # Load OpenAI Whisper model
         try:
-            logger.info(f"Loading Faster Whisper model: {self.config.whisper_model}")
-            # faster-whisper uses different device specification
-            if self.device == "cuda":
-                whisper_device = "cuda"
-                compute_type = "float16"
-            else:
-                whisper_device = "cpu"
-                compute_type = "int8"
-                if self.device == "mps":
-                    logger.info("MPS selected: Whisper will run on CPU backend (faster-whisper currently lacks native MPS support).")
-
-            self.whisper_model = WhisperModel(
+            logger.info(f"Loading Whisper model: {self.config.whisper_model}")
+            self.whisper_model = whisper.load_model(
                 self.config.whisper_model,
-                device=whisper_device,
-                compute_type=compute_type
+                device=self.device
             )
-            logger.info("Faster Whisper model loaded successfully")
+            logger.info("Whisper model loaded successfully")
         except Exception as e:
-            raise RuntimeError(f"Failed to load Faster Whisper model: {e}")
+            raise RuntimeError(f"Failed to load Whisper model: {e}")
         
         # Load pyannote diarization pipeline
         try:
@@ -148,10 +174,18 @@ class SpeechPipeline:
         output_path: Optional[str] = None,
         output_format: Optional[str] = None,
         diarization_output_path: Optional[str] = None,
-        diarization_output_format: str = "txt"
+        diarization_output_format: str = "txt",
+        whisper_output_path: Optional[str] = None,
+        whisper_output_format: str = "txt"
     ) -> TranscriptionResult:
         """
         Process audio file with speaker diarization and speech recognition.
+        
+        New Logic Flow:
+        1. Perform speaker diarization on the full audio
+        2. Segment the audio based on diarization results
+        3. Transcribe each segment with Whisper
+        4. Combine results into final output
         
         Args:
             audio_path: Path to input audio file
@@ -161,6 +195,8 @@ class SpeechPipeline:
             output_format: Transcription output format ('srt', 'vtt', 'json')
             diarization_output_path: Directory or base path for diarization output (if None, automatically saved next to audio)
             diarization_output_format: 'txt' (default), 'rttm', or 'json'
+            whisper_output_path: Directory or base path for raw whisper transcription (if None, automatically saved next to audio)
+            whisper_output_format: 'txt' (default), 'json', or 'srt'
             
         Returns:
             TranscriptionResult object
@@ -174,8 +210,8 @@ class SpeechPipeline:
         # Load audio
         total_duration = self.audio_processor.get_audio_duration(audio_path)
         
-        # Perform speaker diarization
-        logger.info("Performing speaker diarization...")
+        # Step 1: Perform speaker diarization
+        logger.info("Step 1/3: Performing speaker diarization...")
         diarization = self._perform_diarization(
             audio_path, min_speakers, max_speakers
         )
@@ -203,21 +239,36 @@ class SpeechPipeline:
             except Exception as e:  # pragma: no cover - non critical
                 logger.warning(f"Failed to save diarization output: {e}")
         
-        # Perform speech recognition over full audio
-        logger.info("Performing speech recognition...")
-        whisper_segments = self._transcribe_audio(audio_path)
-
-        # Word-level speaker attribution & regrouping
-        # (Falls back to segment-level merge if no word timestamps are available)
-        transcribed_segments = self._word_level_diarization_merge(
-            diarization, whisper_segments
+        # Step 2: Segment audio based on diarization and transcribe each segment
+        logger.info("Step 2/3: Segmenting audio and transcribing each segment...")
+        transcribed_segments = self._transcribe_segments_from_diarization(
+            audio_path, diarization
         )
-        if not transcribed_segments:  # Fallback safety net
-            transcribed_segments = self._merge_diarization_and_transcription(
-                diarization, whisper_segments
-            )
+
+        # Save segment-level whisper transcription (default behavior) unless explicitly disabled
+        if whisper_output_path == "":
+            logger.info("Whisper transcription saving disabled by empty path")
+        else:
+            # Derive default path if not provided
+            if whisper_output_path is None:
+                audio_file = Path(audio_path)
+                whisper_output_path = str(audio_file.parent / f"{audio_file.stem}_whisper")
+            try:
+                logger.info(
+                    "Saving whisper transcription to %s (format=%s)",
+                    whisper_output_path,
+                    whisper_output_format,
+                )
+                self._save_segment_transcriptions(
+                    transcribed_segments,
+                    output_path=whisper_output_path,
+                    fmt=whisper_output_format,
+                )
+            except Exception as e:  # pragma: no cover - non critical
+                logger.warning(f"Failed to save whisper transcription: {e}")
         
-        # Create result
+        # Step 3: Create result
+        logger.info("Step 3/3: Combining results...")
         speakers = list(set(segment.speaker for segment in transcribed_segments))
         speakers.sort()  # Sort for consistent ordering
         
@@ -261,347 +312,133 @@ class SpeechPipeline:
         
         return diarization
     
-    def _transcribe_audio(self, audio_path: str) -> List[Dict[str, Any]]:
-        """Run Whisper transcription over the full audio file."""
-
+    def _transcribe_segments_from_diarization(
+        self,
+        audio_path: str,
+        diarization: Annotation
+    ) -> List[SpeakerSegment]:
+        """
+        Segment audio based on diarization and transcribe each segment.
+        
+        Args:
+            audio_path: Path to the audio file
+            diarization: Diarization annotation with speaker labels
+            
+        Returns:
+            List of SpeakerSegment objects with transcriptions
+        """
         if self.whisper_model is None:
             raise RuntimeError("Whisper model not loaded")
-
-        try:
-            whisper_segments, _ = self.whisper_model.transcribe(
-                audio_path,
-                language=None,
-                word_timestamps=True,
-            )
-        except Exception as exc:  # pragma: no cover - safety belt
-            raise RuntimeError(f"Failed to transcribe audio: {exc}") from exc
-
-        processed_segments: List[Dict[str, Any]] = []
-        for raw_segment in whisper_segments:
-            if raw_segment.text is None:
-                continue
-
-            text = raw_segment.text.strip()
-            if not text:
-                continue
-
-            words_payload: List[Dict[str, Any]] = []
-            if hasattr(raw_segment, "words") and raw_segment.words:
-                for word in raw_segment.words:
-                    if word is None:
-                        continue
-                    word_prob = getattr(word, "probability", None)
-                    words_payload.append(
-                        {
-                            "start": getattr(word, "start", None),
-                            "end": getattr(word, "end", None),
-                            "word": getattr(word, "word", ""),
-                            "probability": word_prob,
-                        }
-                    )
-
-            processed_segments.append(
-                {
-                    "segment": Segment(raw_segment.start, raw_segment.end),
-                    "text": text,
-                    "words": words_payload,
-                    "avg_logprob": getattr(raw_segment, "avg_logprob", None),
-                }
-            )
-
-        return processed_segments
-
-    def _merge_diarization_and_transcription(
-        self,
-        diarization: Annotation,
-        whisper_segments: List[Dict[str, Any]],
-    ) -> List[SpeakerSegment]:
-        """Merge diarization labels with Whisper transcription segments."""
-
-        if not whisper_segments:
-            return []
-
-        speaker_text: List[Dict[str, Any]] = []
-        for entry in whisper_segments:
-            segment: Segment = entry["segment"]
-            speaker_label = self._infer_speaker_for_segment(diarization, segment)
-            speaker_text.append({"segment": segment, "speaker": speaker_label, **entry})
-
-        merged_entries = self._merge_sentences(speaker_text)
-
+        
+        # Load the full audio once
+        audio_data, sample_rate = self.audio_processor.load_audio(audio_path)
+        
+        # Extract segments from diarization
+        diar_segments = []
+        for track in diarization.itertracks(yield_label=True):
+            if len(track) == 3:
+                segment, _track_id, label = track  # type: ignore[misc]
+            else:
+                segment, _track_id = track  # type: ignore[misc]
+                label = "Unknown"
+            
+            diar_segments.append({
+                "start": float(segment.start),
+                "end": float(segment.end),
+                "speaker": str(label)
+            })
+        
+        # Sort by start time
+        diar_segments.sort(key=lambda x: x["start"])
+        
+        # Create speaker mapping
         speaker_mapping: Dict[str, str] = {}
-        formatted_segments: List[SpeakerSegment] = []
-
-        for merged in merged_entries:
-            raw_label = merged["speaker"]
-            display_label = self._format_speaker_label(raw_label, speaker_mapping)
-            confidence = self._compute_confidence(merged["items"])
-
-            formatted_segments.append(
-                SpeakerSegment(
-                    start=merged["start"],
-                    end=merged["end"],
-                    speaker=display_label,
-                    text=merged["text"],
-                    confidence=confidence,
-                )
+        
+        # Transcribe each segment
+        transcribed_segments: List[SpeakerSegment] = []
+        total_segments = len(diar_segments)
+        
+        for idx, seg in enumerate(diar_segments, 1):
+            logger.info(f"Transcribing segment {idx}/{total_segments}: {seg['speaker']} [{seg['start']:.2f}s - {seg['end']:.2f}s]")
+            
+            # Extract audio segment
+            audio_segment = self.audio_processor.extract_segment(
+                audio_data,
+                seg["start"],
+                seg["end"],
+                sample_rate
             )
-
-        formatted_segments.sort(key=lambda seg: seg.start)
-        return formatted_segments
-
-    # ---------------------------------------------------------------------
-    # Word-level diarization + regrouping
-    # ---------------------------------------------------------------------
-    def _word_level_diarization_merge(
-        self,
-        diarization: Annotation,
-        whisper_segments: List[Dict[str, Any]],
-        max_gap: float = 0.75,
-    ) -> List[SpeakerSegment]:
-        """
-        Perform word-level speaker attribution, then regroup contiguous
-        same-speaker words into new segments.
-
-        Steps:
-          1. Iterate over Whisper segments & their words.
-          2. For each word (with timestamps), infer speaker via diarization.
-          3. Accumulate a flat list of word tokens: (start, end, word, speaker, prob).
-          4. Regroup consecutive tokens sharing the same speaker where the
-             inter-word gap <= max_gap seconds.
-          5. Compute per-group confidence as the average of available word probs.
-
-        Fallbacks:
-          * If a Whisper segment has no word timestamps, we assign a single
-            speaker to the whole segment (segment-level inference) and use
-            its avg_logprob (if present) as a proxy confidence.
-          * If no tokens produced overall, returns empty list.
-        """
-        if not whisper_segments:
-            return []
-
-        word_tokens: List[Dict[str, Any]] = []
-
-        # Collect word-level tokens
-        for seg in whisper_segments:
-            segment: Segment = seg["segment"]
-            words = seg.get("words") or []
-            if words:
-                for w in words:
-                    w_start = w.get("start")
-                    w_end = w.get("end")
-                    if w_start is None or w_end is None:
-                        continue
-                    # Construct a tiny segment for speaker inference
-                    w_segment = Segment(float(w_start), float(w_end))
-                    spk = self._infer_speaker_for_segment(diarization, w_segment)
-                    token_text = (w.get("word") or "").strip()
-                    if not token_text:
-                        continue
-                    word_tokens.append(
-                        {
-                            "start": float(w_start),
-                            "end": float(w_end),
-                            "speaker": spk,
-                            "text": token_text,
-                            "prob": w.get("probability"),
-                        }
-                    )
-            else:
-                # Segment-level fallback
-                spk = self._infer_speaker_for_segment(diarization, segment)
+            
+            # Skip very short segments (< 0.1 seconds)
+            if len(audio_segment) < sample_rate * 0.1:
+                logger.debug(f"Skipping very short segment {idx}")
+                continue
+            
+            # Transcribe this segment
+            try:
+                # Whisper requires audio as float32
+                audio_segment = self.audio_processor.preprocess_for_whisper(audio_segment)
+                
+                result = self.whisper_model.transcribe(
+                    audio_segment,
+                    language=None,
+                    word_timestamps=False,  # Not needed for segment-level transcription
+                    verbose=False
+                )
+                
+                text = result.get("text", "").strip()
+                
+                # Calculate confidence from segments if available
                 confidence = None
-                avg_lp = seg.get("avg_logprob")
-                if avg_lp is not None:
-                    try:
-                        confidence = math.exp(float(avg_lp))
-                    except Exception:  # pragma: no cover - safety belt
-                        confidence = None
-                word_tokens.append(
-                    {
-                        "start": float(segment.start),
-                        "end": float(segment.end),
-                        "speaker": spk,
-                        "text": seg.get("text", "").strip(),
-                        "prob": confidence,
-                        "_segment_level": True,
-                    }
+                segments = result.get("segments", [])
+                if segments:
+                    logprobs = [s.get("avg_logprob") for s in segments if s.get("avg_logprob") is not None]
+                    if logprobs:
+                        confidence = sum(math.exp(lp) for lp in logprobs) / len(logprobs)
+                
+                # Format speaker label
+                raw_label = seg["speaker"]
+                if raw_label == "Unknown":
+                    display_label = "Unknown"
+                else:
+                    if raw_label not in speaker_mapping:
+                        speaker_mapping[raw_label] = f"{self.config.speaker_labels} {len(speaker_mapping) + 1}"
+                    display_label = speaker_mapping[raw_label]
+                
+                transcribed_segments.append(
+                    SpeakerSegment(
+                        start=seg["start"],
+                        end=seg["end"],
+                        speaker=display_label,
+                        text=text if text else None,
+                        confidence=confidence
+                    )
                 )
-
-        if not word_tokens:
-            return []
-
-        # Sort by time to ensure proper ordering
-        word_tokens.sort(key=lambda t: (t["start"], t["end"]))
-
-        # Regroup contiguous same-speaker tokens
-        grouped: List[SpeakerSegment] = []
-        buffer: List[Dict[str, Any]] = []
-
-        def flush_buffer():
-            if not buffer:
-                return
-            start = buffer[0]["start"]
-            end = buffer[-1]["end"]
-            speaker_raw = buffer[0]["speaker"]
-            # Join words; if any token was segment-level fallback, keep its full text
-            if any(tok.get("_segment_level") for tok in buffer):
-                text_fragments = [tok["text"] for tok in buffer if tok["text"]]
-            else:
-                text_fragments = [tok["text"] for tok in buffer]
-            text = " ".join(text_fragments).strip()
-            probs = [t["prob"] for t in buffer if t.get("prob") is not None]
-            confidence = sum(probs) / len(probs) if probs else None
-            grouped.append(
-                SpeakerSegment(
-                    start=start,
-                    end=end,
-                    speaker=speaker_raw,
-                    text=text or None,
-                    confidence=confidence,
+                
+            except Exception as e:
+                logger.warning(f"Failed to transcribe segment {idx}: {e}")
+                # Add segment without transcription
+                raw_label = seg["speaker"]
+                if raw_label == "Unknown":
+                    display_label = "Unknown"
+                else:
+                    if raw_label not in speaker_mapping:
+                        speaker_mapping[raw_label] = f"{self.config.speaker_labels} {len(speaker_mapping) + 1}"
+                    display_label = speaker_mapping[raw_label]
+                
+                transcribed_segments.append(
+                    SpeakerSegment(
+                        start=seg["start"],
+                        end=seg["end"],
+                        speaker=display_label,
+                        text=None,
+                        confidence=None
+                    )
                 )
-            )
-            buffer.clear()
+        
+        return transcribed_segments
 
-        prev_end: Optional[float] = None
-        prev_speaker: Optional[str] = None
 
-        for tok in word_tokens:
-            cur_start = tok["start"]
-            cur_speaker = tok["speaker"]
-            gap = (cur_start - prev_end) if (prev_end is not None) else 0.0
-            new_group = False
-            if not buffer:
-                new_group = True
-            else:
-                # Speaker change triggers flush
-                if cur_speaker != prev_speaker:
-                    new_group = True
-                # Excessive gap triggers flush even if same speaker
-                elif gap > max_gap:
-                    new_group = True
-
-            if new_group:
-                flush_buffer()
-            buffer.append(tok)
-            prev_end = tok["end"]
-            prev_speaker = cur_speaker
-
-        flush_buffer()
-
-        # Map raw diarization speakers to user-friendly labels
-        mapping: Dict[str, str] = {}
-        for seg in grouped:
-            seg.speaker = self._format_speaker_label(seg.speaker, mapping)
-
-        grouped.sort(key=lambda s: s.start)
-        return grouped
-
-    def _infer_speaker_for_segment(
-        self, diarization: Annotation, segment: Segment
-    ) -> str:
-        """Infer dominant speaker label for a given time segment."""
-
-        cropped = diarization.crop(segment)
-
-        durations: Dict[str, float] = defaultdict(float)
-        for track in cropped.itertracks(yield_label=True):
-            seg: Segment = track[0]
-            label = track[-1]
-            overlap = max(0.0, min(segment.end, seg.end) - max(segment.start, seg.start))
-            if overlap > 0:
-                durations[str(label)] += overlap
-
-        if not durations:
-            return "Unknown"
-
-        return max(durations.items(), key=lambda item: item[1])[0]
-
-    def _merge_sentences(self, speaker_text: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Merge consecutive segments when speaker remains the same or sentence ends."""
-
-        merged: List[Dict[str, Any]] = []
-        buffer: List[Dict[str, Any]] = []
-        previous_speaker: Optional[str] = None
-
-        for entry in speaker_text:
-            speaker = entry["speaker"]
-            text = entry["text"]
-
-            def flush_buffer() -> None:
-                if not buffer:
-                    return
-                merged.append(self._collapse_buffer(buffer))
-                buffer.clear()
-
-            if previous_speaker is not None and speaker != previous_speaker and buffer:
-                flush_buffer()
-
-            buffer.append(entry)
-            previous_speaker = speaker
-
-            if text and text[-1] in {".", "?", "!", "。", "？", "！", "…"}:
-                flush_buffer()
-                previous_speaker = None
-
-        if buffer:
-            merged.append(self._collapse_buffer(buffer))
-
-        return merged
-
-    @staticmethod
-    def _collapse_buffer(buffer: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Collapse buffered segments into a single merged entry."""
-
-        start = buffer[0]["segment"].start
-        end = buffer[-1]["segment"].end
-        speaker = buffer[0]["speaker"]
-        text = " ".join(item["text"] for item in buffer).strip()
-
-        return {
-            "start": start,
-            "end": end,
-            "speaker": speaker,
-            "text": text,
-            "items": list(buffer),
-        }
-
-    @staticmethod
-    def _compute_confidence(items: List[Dict[str, Any]]) -> Optional[float]:
-        """Compute aggregated confidence from word probabilities or avg logprob."""
-
-        word_probs: List[float] = []
-        for entry in items:
-            for word in entry.get("words", []):
-                prob = word.get("probability")
-                if prob is not None:
-                    word_probs.append(prob)
-
-        if word_probs:
-            return sum(word_probs) / len(word_probs)
-
-        logprobs: List[float] = []
-        for entry in items:
-            avg_logprob = entry.get("avg_logprob")
-            if avg_logprob is not None:
-                logprobs.append(float(avg_logprob))
-        if logprobs:
-            return sum(math.exp(lp) for lp in logprobs) / len(logprobs)
-
-        return None
-
-    def _format_speaker_label(
-        self, raw_label: str, mapping: Dict[str, str]
-    ) -> str:
-        """Convert raw diarization labels into user-friendly speaker names."""
-
-        if raw_label == "Unknown":
-            return "Unknown"
-
-        if raw_label not in mapping:
-            mapping[raw_label] = f"{self.config.speaker_labels} {len(mapping) + 1}"
-
-        return mapping[raw_label]
     
     def _save_result(
         self,
@@ -636,6 +473,86 @@ class SpeechPipeline:
         output_file.write_text(content, encoding="utf-8")
         
         logger.info(f"Results saved to: {output_file}")
+    
+    def _save_segment_transcriptions(
+        self,
+        segments: List[SpeakerSegment],
+        output_path: str,
+        fmt: str = "txt"
+    ) -> None:
+        """Save segment-level transcriptions.
+
+        Supported formats:
+          txt   - Human-readable plain text with timestamps and speakers
+          json  - JSON list of segments with timestamps and speakers
+          srt   - SubRip format with speaker labels
+        """
+        fmt = fmt.lower()
+        path = Path(output_path)
+        if fmt == "txt" and path.suffix.lower() != ".txt":
+            path = path.with_suffix(".txt")
+        elif fmt == "json" and path.suffix.lower() != ".json":
+            path = path.with_suffix(".json")
+        elif fmt == "srt" and path.suffix.lower() != ".srt":
+            path = path.with_suffix(".srt")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def _format_timestamp(seconds: float) -> str:
+            """Format seconds to HH:MM:SS.sss."""
+            hrs = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            secs = seconds % 60
+            return f"{hrs:02}:{mins:02}:{secs:06.3f}"
+        
+        def _format_srt_timestamp(seconds: float) -> str:
+            """Format seconds to SRT timestamp (HH:MM:SS,mmm)."""
+            hrs = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            secs = int(seconds % 60)
+            millis = int((seconds % 1) * 1000)
+            return f"{hrs:02}:{mins:02}:{secs:02},{millis:03}"
+
+        if fmt == "txt":
+            lines = []
+            for idx, seg in enumerate(segments, 1):
+                start_time = _format_timestamp(seg.start)
+                end_time = _format_timestamp(seg.end)
+                text = seg.text or "[No speech detected]"
+                lines.append(f"{idx}. [{start_time} --> {end_time}] {seg.speaker}")
+                lines.append(f"   {text}")
+                lines.append("")  # Empty line between segments
+            path.write_text("\n".join(lines), encoding="utf-8")
+        
+        elif fmt == "json":
+            import json
+            json_segments = []
+            for seg in segments:
+                json_segments.append({
+                    "start": _format_timestamp(seg.start),
+                    "end": _format_timestamp(seg.end),
+                    "speaker": seg.speaker,
+                    "text": seg.text,
+                    "confidence": seg.confidence
+                })
+            path.write_text(json.dumps(json_segments, ensure_ascii=False, indent=2), encoding="utf-8")
+        
+        elif fmt == "srt":
+            lines = []
+            for idx, seg in enumerate(segments, 1):
+                start_time = _format_srt_timestamp(seg.start)
+                end_time = _format_srt_timestamp(seg.end)
+                text = seg.text or "[No speech detected]"
+                lines.append(str(idx))
+                lines.append(f"{start_time} --> {end_time}")
+                lines.append(f"[{seg.speaker}] {text}")
+                lines.append("")  # Empty line between segments
+            path.write_text("\n".join(lines), encoding="utf-8")
+        
+        else:
+            raise ValueError(f"Unsupported whisper output format: {fmt}")
+
+        logger.info(f"Segment transcriptions saved to: {path}")
     
     def _save_diarization(
         self,
@@ -679,6 +596,13 @@ class SpeechPipeline:
                     "speaker": str(label),
                 }
             )
+        
+        def _format_timestamp(seconds: float) -> str:
+            """Format seconds to HH:MM:SS.sss for TXT output."""
+            hrs = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            secs = seconds % 60
+            return f"{hrs:02}:{mins:02}:{secs:06.3f}"
 
         if fmt == "rttm":
             # Compose RTTM lines (SPEAKER <file_id> 1 <start> <duration> <NA> <NA> <speaker> <NA> <NA>)
@@ -691,12 +615,18 @@ class SpeechPipeline:
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         elif fmt == "json":
             import json
+            # also format timestamps for readability
+            for seg in segments:
+                seg['start'] = _format_timestamp(seg['start'])
+                seg['end'] = _format_timestamp(seg['end'])
+                seg['duration'] = _format_timestamp(seg['duration'])
+                seg['speaker'] = str(seg['speaker'])
             path.write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
         elif fmt == "txt":
             lines = []
             for seg in segments:
                 lines.append(
-                    f"[{seg['start']:.2f}-{seg['end']:.2f}] {seg['speaker']}"
+                    f"[{_format_timestamp(seg['start'])}-{_format_timestamp(seg['end'])}] {seg['speaker']}"
                 )
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         else:

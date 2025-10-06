@@ -5,10 +5,10 @@ description = "Speech recognition and speaker diarization pipeline using Whisper
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    # Faster Whisper implementation (2-4x faster, same accuracy)
-    "faster-whisper>=1.0.0",
-    "pyannote.audio>=3.1.0,<4.0.0",
-    "pyannote.core>=5.0.0,<6.0.0",
+    # OpenAI Whisper for speech recognition
+    "openai-whisper>=20231117",
+    "pyannote.audio>=3.1,<4.0.0",
+    "pyannote.core>=5.0.0,<6.0.1",
     
     "python-dotenv>=1.0.0",
     "click>=8.1.0",
