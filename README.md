@@ -2,9 +2,11 @@
 
 A complete pipeline for speech recognition and speaker diarization using Whisper and pyannote, designed to run locally on PC or Mac.
 
+> **Note**: This version uses **pyannote.audio 4.0** with updated dependencies and models.
+
 ## Features
 
-- **Speaker Diarization**: Uses pyannote.audio to identify and separate different speakers
+- **Speaker Diarization**: Uses pyannote.audio 4.0 to identify and separate different speakers
 - **Speech Recognition**: Uses OpenAI Whisper for accurate transcription
 - **Multiple Output Formats**: Supports SRT, VTT, and JSON output formats
 - **Local Processing**: Runs entirely on your local machine
@@ -13,10 +15,13 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 
 ## Requirements
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - uv package manager
 - Sufficient RAM (8GB+ recommended for larger models)
-- GPU support optional but recommended for faster processing
+- **GPU acceleration**: Only available on Linux systems with CUDA support
+- **torchcodec** (beta): Required dependency - see [torchcodec GitHub](https://github.com/pytorch/torchcodec) for details
+  - GPU/CUDA support: Linux and macOS only
+  - Windows: Limited support, CPU-only recommended
 
 ## Installation
 
@@ -50,7 +55,7 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 4. **Get Hugging Face Token**:
    - Go to [Hugging Face](https://huggingface.co/) and create an account
    - Get your access token from Settings > Access Tokens
-   - Accept the license for pyannote models at [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - Accept the license for pyannote models at [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
 
 ## Usage
 
@@ -79,7 +84,7 @@ from speech_pipeline import SpeechPipeline
 # Initialize pipeline
 pipeline = SpeechPipeline(
     whisper_model="base",
-    pyannote_model="pyannote/speaker-diarization-3.1"
+    pyannote_model="pyannote/speaker-diarization-community-1"
 )
 
 # Process audio file
@@ -114,7 +119,7 @@ with open("output.srt", "w") as f:
 - `large`: Best accuracy (~1550 MB)
 
 ### pyannote Models
-- Uses `pyannote/speaker-diarization-3.1` by default
+- Uses `pyannote/speaker-diarization-community-1` (pyannote.audio 4.0)
 - Requires Hugging Face token and license acceptance
 
 ## Contributing
