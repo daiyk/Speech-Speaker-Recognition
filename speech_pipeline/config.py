@@ -37,7 +37,10 @@ class Config:
             load_dotenv(env_file)
         else:
             load_dotenv()
-        
+        min_speakers_str = os.getenv("MIN_SPEAKERS")
+        min_speakers = int(min_speakers_str) if min_speakers_str else None
+        max_speakers_str = os.getenv("MAX_SPEAKERS")
+        max_speakers = int(max_speakers_str) if max_speakers_str else None
         return cls(
             huggingface_token=os.getenv("HUGGINGFACE_TOKEN"),
             openai_api_key=os.getenv("OPENAI_API_KEY", None),
@@ -45,6 +48,8 @@ class Config:
             pyannote_model=os.getenv("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1"),
             output_format=os.getenv("OUTPUT_FORMAT", "srt"),
             speaker_labels=os.getenv("SPEAKER_LABELS", "Speaker"),
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
         )
     
     def validate(self) -> None:
