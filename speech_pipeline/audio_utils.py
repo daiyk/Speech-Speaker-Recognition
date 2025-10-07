@@ -17,8 +17,8 @@ class AudioProcessor:
     
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
-    
-    def load_audio(self, audio_path: str) -> Tuple[np.ndarray, int]:
+
+    def load_audio(self, audio_path: str, resample: bool = True) -> Tuple[np.ndarray, int]:
         """
         Load audio file and convert to the specified sample rate.
         
@@ -37,7 +37,7 @@ class AudioProcessor:
             # Try loading with librosa first (handles most formats)
             audio_data, sr = librosa.load(
                 audio_path,
-                sr=self.sample_rate,
+                sr=self.sample_rate if resample else None,
                 mono=True
             )
             effective_sr = int(sr)

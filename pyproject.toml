@@ -3,12 +3,12 @@ name = "speech-speaker-recognition"
 version = "0.1.0"
 description = "Speech recognition and speaker diarization pipeline using Whisper and pyannote"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     # Faster Whisper implementation (2-4x faster, same accuracy)
     "faster-whisper>=1.0.0",
-    "pyannote.audio>=3.1.0,<4.0.0",
-    "pyannote.core>=5.0.0,<6.0.0",
+    "pyannote.audio==4.0.0",
+    "pyannote.core>=5.0.0",
     
     "python-dotenv>=1.0.0",
     "click>=8.1.0",
@@ -25,21 +25,24 @@ dependencies = [
     "torch==2.8.0",
     "torchvision==0.23.0",
     "torchaudio==2.8.0",
+    "torchcodec==0.7.0",
 
     "Setuptools<81",
     ]
 
 [tool.uv.sources]
 torch = [
-    {index = "pytorch-cu126", marker = "sys_platform != 'darwin'"},
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux'"},
 ]
 torchvision = [
-    {index = "pytorch-cu126", marker = "sys_platform != 'darwin'"},
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux'"},
 ]
 torchaudio = [
-    {index = "pytorch-cu126", marker = "sys_platform != 'darwin'"},
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux'"},
 ]
-
+torchcodec = [
+    {index = "pytorch-cu126", marker = "sys_platform == 'linux'"},
+]
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
