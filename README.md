@@ -41,16 +41,33 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
    ```
 
-3. **Setup environment variables**:
+3. **Configure environment variables**:
+   
+   Create a `.env` file in the project root:
    ```bash
-   cp .env.example .env
-   # Edit .env file and add your Hugging Face token
+   # Required
+   HUGGINGFACE_TOKEN=your_token_here
+   
+   # Optional
+   WHISPER_MODEL=base                                    # Default: base
+   PYANNOTE_MODEL=pyannote/speaker-diarization-3.1      # Default: pyannote/speaker-diarization-3.1
+   OUTPUT_FORMAT=srt                                     # Default: srt (options: srt, vtt, json)
+   SPEAKER_LABELS=Speaker                                # Default: Speaker
+   MIN_SPEAKERS=                                         # Optional: minimum number of speakers
+   MAX_SPEAKERS=                                         # Optional: maximum number of speakers
    ```
 
-4. **Get Hugging Face Token**:
-   - Go to [Hugging Face](https://huggingface.co/) and create an account
-   - Get your access token from Settings > Access Tokens
-   - Accept the license for pyannote models at [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   **Required Parameters:**
+   - `HUGGINGFACE_TOKEN`: Get from [Hugging Face](https://huggingface.co/) → Settings → Access Tokens
+   - Accept license at [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+
+   **Optional Parameters:**
+   - `WHISPER_MODEL`: Model size (tiny, base, small, medium, large, large-v2, large-v3)
+   - `PYANNOTE_MODEL`: Diarization model identifier
+   - `OUTPUT_FORMAT`: Output file format (srt, vtt, json)
+   - `SPEAKER_LABELS`: Prefix for speaker labels in output
+   - `MIN_SPEAKERS`: Minimum expected speakers (leave empty for auto-detection)
+   - `MAX_SPEAKERS`: Maximum expected speakers (leave empty for auto-detection)
 
 ## Usage
 
@@ -58,17 +75,36 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 
 Process an audio file:
 ```bash
-speech-pipeline process input.wav --output output.srt
+uv run speech-pipeline process input.wav --output output.srt
 ```
 
 With custom settings:
 ```bash
-speech-pipeline process input.wav \
+uv run speech-pipeline process input.wav \
     --output output.srt \
     --whisper-model medium \
     --format srt \
     --min-speakers 2 \
-    --max-speakers 5
+    --max-speakers 5 \
+    --device cuda
+```
+
+Available options:
+- `--output, -o`: Output file path
+- `--format, -f`: Output format (srt, vtt, json)
+- `--whisper-model, -w`: Whisper model size
+- `--min-speakers`: Minimum number of speakers
+- `--max-speakers`: Maximum number of speakers
+- `--device`: Device to use (cpu, cuda, mps)
+
+Get audio file information:
+```bash
+uv run speech-pipeline info input.wav
+```
+
+List available models:
+```bash
+uv run speech-pipeline models
 ```
 
 ### Python API
@@ -79,24 +115,35 @@ from speech_pipeline import SpeechPipeline
 # Initialize pipeline
 pipeline = SpeechPipeline(
     whisper_model="base",
-    pyannote_model="pyannote/speaker-diarization-3.1"
+    device="cpu"  # or "cuda", "mps"
 )
 
 # Process audio file
-result = pipeline.process("input.wav")
+result = pipeline.process(
+    "input.wav",
+    min_speakers=2,
+    max_speakers=5,
+    output_path="output.srt",
+    output_format="srt"
+)
 
-# Save as SRT
+# Access results
+print(f"Duration: {result.total_duration:.2f}s")
+print(f"Speakers: {', '.join(result.speakers)}")
+
+# Save in different formats
 with open("output.srt", "w") as f:
     f.write(result.to_srt())
+    
+with open("output.json", "w") as f:
+    f.write(result.to_json())
 ```
 
 ## Pipeline Process
 
-1. **Audio Loading**: Load and preprocess audio file
-2. **Speaker Diarization**: Use pyannote to identify speaker segments
-3. **Audio Segmentation**: Split audio into speaker-specific segments
-4. **Speech Recognition**: Use Whisper to transcribe each segment
-5. **Output Generation**: Create timestamped captions with speaker labels
+1. **Speaker Diarization**: Identify speaker segments using pyannote
+2. **Speech Recognition**: Transcribe full audio using Whisper with word timestamps
+3. **Merge Results**: Assign speakers to transcribed words and merge into sentences
 
 ## Output Formats
 
@@ -119,10 +166,10 @@ with open("output.srt", "w") as f:
 
 ## Contributing
 
-1. Install development dependencies: `uv pip install -e ".[dev]"`
-2. Run tests: `pytest`
-3. Format code: `black .`
-4. Type checking: `mypy speech_pipeline`
+1. Install development dependencies: `uv sync`
+2. Run tests: `uv run pytest`
+3. Format code: `uv run black .`
+4. Type checking: `uv run mypy speech_pipeline`
 
 ## License
 
