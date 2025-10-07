@@ -20,8 +20,8 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 - Sufficient RAM (8GB+ recommended for larger models)
 - **GPU acceleration**: Only available on Linux systems with CUDA support
 - **torchcodec** (beta): Required dependency - see [torchcodec GitHub](https://github.com/pytorch/torchcodec) for details
-  - GPU/CUDA support: Linux and macOS only
-  - Windows: Limited support, CPU-only recommended
+  - GPU/CUDA support: Linux only
+  - Windows/MacOS: Limited support, CPU-only recommended
 
 ## Installation
 
