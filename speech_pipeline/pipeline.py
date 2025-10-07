@@ -151,7 +151,7 @@ class SpeechPipeline:
         max_speakers: Optional[int] = None,
         output_path: Optional[str] = None,
         output_format: Optional[str] = None,
-        diarization_output_path: Optional[str] = None,
+        diarization_output_path: Optional[str] = "",  # disable diarization saving by default
         diarization_output_format: str = "txt"
     ) -> TranscriptionResult:
         """
@@ -245,6 +245,10 @@ class SpeechPipeline:
         max_speakers: Optional[int]
     ) -> Annotation:
         """Perform speaker diarization on audio file."""
+        import tempfile
+        import soundfile as sf
+        import numpy as np
+
         # Set speaker constraints
         diarization_params = {}
         if min_speakers is not None:
@@ -255,15 +259,147 @@ class SpeechPipeline:
         # Run diarization
         if self.diarization_pipeline is None:
             raise RuntimeError("Diarization pipeline not loaded")
+        # Pre-process audio to avoid chunking issues with pyannote
+        # Use silence padding instead of resampling
+        temp_file_path = None
+        try:
+            audio_info = sf.info(audio_path)
+            original_sr = audio_info.samplerate
+            original_duration = audio_info.duration
+            original_frames = audio_info.frames
+            logger.info(f"Audio file info: {original_sr}Hz, {original_duration:.2f}s, {original_frames} samples")
             
-        if diarization_params:
-            diarization = self.diarization_pipeline(
-                audio_path, **diarization_params
+            # Detect sample rate mismatch
+            mismatch = self._detect_sample_mismatch(
+                audio_path=audio_path,
+                claimed_sr=original_sr,
+                duration=original_duration,
+                frames=original_frames
+            )
+                        # Load audio data
+            audio_data, sr = sf.read(audio_path, always_2d=False)
+            
+            # Ensure mono
+            if audio_data.ndim > 1:
+                audio_data = np.mean(audio_data, axis=1)
+                logger.debug("Converted stereo audio to mono")
+            
+            # Calculate expected samples for clean chunking
+            duration = len(audio_data) / sr
+            # Round duration to nearest 0.01 second to avoid fractional samples
+            clean_duration = round(duration, 2)
+            expected_samples = int(clean_duration * sr)
+            actual_samples = len(audio_data)
+            
+            # Pad or trim to exact expected length
+            if actual_samples < expected_samples:
+                # Pad with silence at the end
+                pad_samples = expected_samples - actual_samples
+                audio_data = np.pad(audio_data, (0, pad_samples), mode='constant', constant_values=0)
+                logger.info(f"Padded audio with {pad_samples} silent samples ({pad_samples/sr*1000:.2f}ms) to reach {expected_samples} total samples")
+            elif actual_samples > expected_samples:
+                # Trim excess samples from the end
+                trim_samples = actual_samples - expected_samples
+                audio_data = audio_data[:expected_samples]
+                logger.info(f"Trimmed {trim_samples} samples ({trim_samples/sr*1000:.2f}ms) to reach {expected_samples} total samples")
+            else:
+                logger.debug(f"No padding needed: audio already has exact sample count ({actual_samples} samples)")
+            
+            # Create temporary WAV file with exact sample count
+            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            temp_file_path = temp_file.name
+            temp_file.close()
+            
+            # Write audio with original sample rate and exact sample count
+            sf.write(temp_file_path, audio_data, sr, subtype='PCM_16')
+            
+            # Verify the written file
+            verify_info = sf.info(temp_file_path)
+            logger.debug(
+                f"Created padded audio file: {temp_file_path} "
+                f"({verify_info.samplerate}Hz, {verify_info.duration:.3f}s, {verify_info.frames} samples)"
+            )
+            
+            # Run diarization on the padded audio
+            if diarization_params:
+                diarization = self.diarization_pipeline(temp_file_path, **diarization_params)
+            else:
+                diarization = self.diarization_pipeline(temp_file_path)
+            
+            # Convert to Annotation (pyannote 4.0 compatibility)
+            if hasattr(diarization, "itertracks"):
+                result = diarization
+            else:
+                result = diarization.speaker_diarization
+            
+            return result
+            
+        finally:
+            # Clean up temporary file
+            if temp_file_path is not None:
+                try:
+                    Path(temp_file_path).unlink()
+                    logger.debug(f"Cleaned up temporary file: {temp_file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file {temp_file_path}: {e}")
+    
+    def _detect_sample_mismatch(
+        self,
+        audio_path: str,
+        claimed_sr: int,
+        duration: float,
+        frames: int
+    ) -> bool:
+        """
+        Detect sample rate mismatches by comparing claimed vs actual sample counts.
+        
+        Args:
+            audio_path: Path to the audio file
+            claimed_sr: Sample rate reported by file metadata
+            duration: Duration in seconds reported by file metadata
+            frames: Total number of frames/samples in the file
+        """
+        # Calculate expected samples based on duration and claimed sample rate
+        expected_samples = int(duration * claimed_sr)
+        actual_samples = frames
+        
+        # Calculate the difference
+        sample_diff = actual_samples - expected_samples
+        if sample_diff == 0:
+            logger.debug(f"✓ No sample mismatch detected: {actual_samples} samples match expected")
+            return False
+        
+        # Calculate percentage difference
+        diff_pct = (abs(sample_diff) / expected_samples) * 100 if expected_samples > 0 else 0
+        
+        # Log the mismatch with appropriate severity
+        if abs(sample_diff) <= 10:
+            # Tiny mismatch - likely rounding, very common and safe to ignore
+            logger.debug(
+                f"Negligible sample mismatch: expected {expected_samples}, "
+                f"got {actual_samples} (diff: {sample_diff:+d}, {diff_pct:.4f}%)"
+            )
+        elif diff_pct < 0.1:
+            # Small mismatch - less than 0.1% difference
+            logger.debug(
+                f"Minor sample mismatch: expected {expected_samples}, "
+                f"got {actual_samples} (diff: {sample_diff:+d}, {diff_pct:.3f}%)"
+            )
+        elif diff_pct < 0.5:
+            # Moderate mismatch - could cause issues with strict chunking
+            logger.info(
+                f"⚠ Sample mismatch detected: expected {expected_samples}, "
+                f"got {actual_samples} (diff: {sample_diff:+d}, {diff_pct:.2f}%)"
             )
         else:
-            diarization = self.diarization_pipeline(audio_path)
-        
-        return diarization
+            # Significant mismatch - likely to cause chunking errors
+            logger.warning(
+                f"⚠⚠ Significant sample mismatch: expected {expected_samples}, "
+                f"got {actual_samples} (diff: {sample_diff:+d}, {diff_pct:.2f}%)"
+            )
+            # raise error
+            raise ValueError("Significant sample mismatch detected")
+        return True
     
     def _transcribe_audio(self, audio_path: str) -> List[Dict[str, Any]]:
         """Run Whisper transcription over the full audio file."""
