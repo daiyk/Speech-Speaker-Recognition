@@ -1,0 +1,189 @@
+#!/bin/bash
+# ==============================================================================
+# PLEASE EDIT STEP 3 TO CONFIGURE THE SCRIPT BEFORE RUNNING!!
+# ==============================================================================
+# Speech-Speaker-Recognition Batch Processor
+#
+# This script processes all .mp3 files in a specified directory. For each file,
+# it splits it into smaller chunks, runs the speech-pipeline on each chunk,
+# and then merges the resulting SRT files into a single, time-corrected output.
+# ==============================================================================
+
+set -e
+
+# =====================================================
+# 1. Make the script executable
+# =====================================================
+chmod +x "$0"
+
+# =====================================================
+# 2. Load Defaults from .env file (if it exists)
+# =====================================================
+if [ -f "$(pwd)/.env" ]; then
+    echo "Loading default variables from .env file..."
+    set -o allexport
+    source "$(pwd)/.env"
+    set +o allexport
+fi
+
+# =====================================================
+# 3. USER CONFIGURATION
+# =====================================================
+# --- EDIT THE VARIABLES BELOW ---
+# These variables will override any values set in the .env file.
+
+# 1. (Required) Your Hugging Face API token.
+export HUGGINGFACE_TOKEN="your_token_here"
+
+# 2. The absolute path to the Speech-Speaker-Recognition project directory, default to current file's directory.
+SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 3. (Required) Default input directory containing .mp3 files. Can be overridden by the 1st command-line argument.
+INPUT_MP3_DIR=""
+
+# 4. Default output directory. Can be overridden by the 2nd command-line argument.
+OUTPUT_DIR=""
+
+# --- END OF USER CONFIGURATION ---
+# =====================================================
+
+export TORCH_AUDIO_BACKEND="soundfile"
+
+# Override config with command-line arguments (highest precedence)
+INPUT_MP3_DIR=${1:-$INPUT_MP3_DIR}
+OUTPUT_DIR=${2:-$OUTPUT_DIR}
+
+# =====================================================
+# 4. Validate Configuration
+# =====================================================
+if [ "$HUGGINGFACE_TOKEN" == "your_token_here" ] || [ -z "$HUGGINGFACE_TOKEN" ]; then
+    echo "ERROR: Hugging Face token not set. Edit this script to set the HUGGINGFACE_TOKEN variable."
+    echo "You must also accept the pyannote license at: https://huggingface.co/pyannote/speaker-diarization-3.1"
+    exit 1
+fi
+
+if [ ! -d "$SRC_DIR" ]; then
+    echo "ERROR: Project source directory not found at '$SRC_DIR'. Please edit the variable."
+    exit 1
+fi
+
+if [ -z "$INPUT_MP3_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
+    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory>"
+    echo "Alternatively, edit the INPUT_MP3_DIR and OUTPUT_DIR variables inside the script."
+    exit 1
+fi
+
+if [ ! -d "$INPUT_MP3_DIR" ]; then
+    echo "ERROR: Input directory '$INPUT_MP3_DIR' not found."
+    exit 1
+fi
+
+# Check for ffmpeg installation
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "!!! ERROR: ffmpeg is not installed or not in your PATH."
+    echo "!!! Please install it to proceed."
+    echo "!!! On macOS (using Homebrew): brew install ffmpeg"
+    echo "!!! On Debian/Ubuntu: sudo apt-get install ffmpeg"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    exit 1
+fi
+
+# =====================================================
+# 5. Setup Environment
+# =====================================================
+echo "Changing to source directory: $SRC_DIR"
+cd "$SRC_DIR"
+
+if ! command -v uv >/dev/null 2>&1; then
+   echo "uv not found. Installing..."
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+fi
+
+echo "Syncing dependencies..."
+uv sync
+
+echo "Activating virtual environment..."
+source .venv/bin/activate
+
+# =====================================================
+# 6. Process All MP3 Files in Directory
+# =====================================================
+for mp3_file in "$INPUT_MP3_DIR"/*.mp3; do
+    # If no mp3 files are found, the loop will run once with a non-existent path
+    if [ ! -f "$mp3_file" ]; then
+        echo "No .mp3 files found in $INPUT_MP3_DIR. Exiting."
+        continue
+    fi
+
+    echo "-----------------------------------------------------------------"
+    echo "Processing file: $mp3_file"
+    echo "-----------------------------------------------------------------"
+
+    FILENAME=$(basename "$mp3_file")
+    BASENAME="${FILENAME%.*}"
+    MERGED_DIR="$OUTPUT_DIR/final_srt"
+
+    CHUNK_DIR="$SRC_DIR/chunks_temp"
+    SRT_DIR="$SRC_DIR/srt_temp"
+    mkdir -p "$CHUNK_DIR" "$SRT_DIR" "$MERGED_DIR"
+
+    echo "Splitting $mp3_file into 30s chunks..."
+    ffmpeg -i "$mp3_file" -f segment -segment_time 30 -c copy "$CHUNK_DIR/${BASENAME}_%03d.mp3"
+
+    echo "Running speech-pipeline on each chunk..."
+    for chunk in $(ls "$CHUNK_DIR/${BASENAME}"_*.mp3 | sort); do
+        [[ -f "$chunk" ]] || continue
+        CHUNK_BASENAME=$(basename "$chunk" .mp3)
+        echo "→ Processing: $CHUNK_BASENAME"
+        speech-pipeline process "$chunk" --output "$SRT_DIR/${CHUNK_BASENAME}.srt"
+    done
+
+    # --- Merge SRTs with corrected timestamps ---
+    OUTPUT_FILE="$MERGED_DIR/$BASENAME.srt"
+    echo "Merging all SRTs into $OUTPUT_FILE"
+    > "$OUTPUT_FILE"
+
+    counter=1
+    offset_ms=0
+
+    to_ms() { local t=$1; local h=${t:0:2} m=${t:3:2} s=${t:6:2} ms=${t:9:3}; echo $((10#$h*3600000 + 10#$m*60000 + 10#$s*1000 + 10#$ms)); }
+    to_time() { local t=$1; local h=$((t/3600000)) m=$(((t%3600000)/60000)) s=$(((t%60000)/1000)) ms=$((t%1000)); printf "%02d:%02d:%02d,%03d" $h $m $s $ms; }
+
+    for srt_file in $(ls "$SRT_DIR/${BASENAME}"_*.srt | sort); do
+        echo "Adding $srt_file"
+        chunk_mp3_file="$CHUNK_DIR/$(basename "$srt_file" .srt).mp3"
+        if [ ! -f "$chunk_mp3_file" ]; then continue; fi
+
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[0-9]+$ ]]; then
+                echo "$counter" >> "$OUTPUT_FILE"; ((counter++))
+            elif [[ "$line" =~ ^([0-9:,]+)\ -->\ ([0-9:,]+)$ ]]; then
+                start_ms=$(to_ms "${BASH_REMATCH[1]}")
+                end_ms=$(to_ms "${BASH_REMATCH[2]}")
+                new_start_ms=$((start_ms + offset_ms))
+                new_end_ms=$((end_ms + offset_ms))
+                echo "$(to_time $new_start_ms) --> $(to_time $new_end_ms)" >> "$OUTPUT_FILE"
+            else
+                echo "$line" >> "$OUTPUT_FILE"
+            fi
+        done < "$srt_file"
+        echo "" >> "$OUTPUT_FILE"
+
+        chunk_duration_ms=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$chunk_mp3_file" | awk '{printf("%d",$1*1000)}')
+        offset_ms=$((offset_ms + chunk_duration_ms))
+    done
+
+    echo "Merged SRT saved to: $OUTPUT_FILE"
+
+    # --- Clean up temporary files for the processed mp3 ---
+    echo "Cleaning up temporary files for $BASENAME..."
+    rm -rf "$CHUNK_DIR"
+    rm -rf "$SRT_DIR"
+
+    echo "Finished processing $BASENAME."
+done
+
+echo "======================================"
+echo "All files have been processed."
