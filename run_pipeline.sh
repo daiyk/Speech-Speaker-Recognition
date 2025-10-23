@@ -39,23 +39,26 @@ fi
 # --- EDIT THE VARIABLES BELOW ---
 # These variables will override any values set in the .env file.
 
-# 1. (Required) Your Hugging Face API token.
+# 1. (Required) Your Hugging Face API token, refer to README.md of this project to see the guideline
 export HUGGINGFACE_TOKEN="your_token_here"
 
 # 2. The absolute path to the Speech-Speaker-Recognition project directory, default to current file's directory.
-SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 3. (Required) Default input directory containing .mp3 files. Can be overridden by the 1st command-line argument.
 INPUT_MP3_DIR=""
 
-# 4. Default output directory. Can be overridden by the 2nd command-line argument.
-OUTPUT_DIR=""
+# 4. Default output directory, default to INPUT_MP3_DIR/output Can be overridden by the 2nd command-line argument.
+OUTPUT_DIR="${INPUT_MP3_DIR}/output"
 
 # 5. Minimum number of speakers. Can be overridden by the 3rd command-line argument.
 MIN_SPEAKERS=2
 
 # 6. Maximum number of speakers. Can be overridden by the 4th command-line argument.
 MAX_SPEAKERS=3
+
+# 7. Chunk length in seconds. Can be overridden by the 5th command-line argument.
+CHUNK_LENGTH=60
 
 # --- END OF USER CONFIGURATION ---
 # =====================================================
@@ -67,6 +70,7 @@ INPUT_MP3_DIR=${1:-$INPUT_MP3_DIR}
 OUTPUT_DIR=${2:-$OUTPUT_DIR}
 MIN_SPEAKERS=${3:-$MIN_SPEAKERS}
 MAX_SPEAKERS=${4:-$MAX_SPEAKERS}
+CHUNK_LENGTH=${5:-$CHUNK_LENGTH}
 
 # =====================================================
 # 4. Validate Configuration
@@ -83,8 +87,8 @@ if [ ! -d "$SRC_DIR" ]; then
 fi
 
 if [ -z "$INPUT_MP3_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
-    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers]"
-    echo "Alternatively, edit the INPUT_MP3_DIR, OUTPUT_DIR, MIN_SPEAKERS, and MAX_SPEAKERS variables inside the script."
+    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers] [chunk_length_in_seconds]"
+    echo "Alternatively, edit the INPUT_MP3_DIR, OUTPUT_DIR, MIN_SPEAKERS, MAX_SPEAKERS, and CHUNK_LENGTH variables inside the script."
     exit 1
 fi
 
@@ -144,8 +148,8 @@ for mp3_file in "$INPUT_MP3_DIR"/*.mp3; do
     SRT_DIR="$SRC_DIR/srt_temp"
     mkdir -p "$CHUNK_DIR" "$SRT_DIR" "$MERGED_DIR"
 
-    echo "Splitting $mp3_file into 30s chunks..."
-    ffmpeg -i "$mp3_file" -f segment -segment_time 30 -c copy "$CHUNK_DIR/${BASENAME}_%03d.mp3"
+    echo "Splitting $mp3_file into ${CHUNK_LENGTH}s chunks..."
+    ffmpeg -i "$mp3_file" -f segment -segment_time "$CHUNK_LENGTH" -c copy "$CHUNK_DIR/${BASENAME}_%03d.mp3"
 
     echo "Running speech-pipeline on each chunk..."
     for chunk in $(ls "$CHUNK_DIR/${BASENAME}"_*.mp3 | sort); do
@@ -174,7 +178,7 @@ for mp3_file in "$INPUT_MP3_DIR"/*.mp3; do
         while IFS= read -r line; do
             if [[ "$line" =~ ^[0-9]+$ ]]; then
                 echo "$counter" >> "$OUTPUT_FILE"; ((counter++))
-            elif [[ "$line" =~ ^([0-9:,]+)\ -->\ ([0-9:,]+)$ ]]; then
+            elif [[ "$line" =~ ^([0-9:,]+)\ --\>\ ([0-9:,]+)$ ]]; then
                 start_ms=$(to_ms "${BASH_REMATCH[1]}")
                 end_ms=$(to_ms "${BASH_REMATCH[2]}")
                 new_start_ms=$((start_ms + offset_ms))
