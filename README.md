@@ -18,6 +18,11 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 - Sufficient RAM (8GB+ recommended for larger models)
 - GPU support optional but recommended for faster processing
 
+## Quick Start
+`run_pipeline.sh` provides a convenient and easy-to-follow guided way to do large amount of audio transcription, please edit this `.sh` to fill up required variables (setp 3) and set it executable before running ".run_pipeline.sh":
+```
+chmod +x run_pipeline.sh
+```
 ## Installation
 
 1. **Install uv** (if not already installed):
