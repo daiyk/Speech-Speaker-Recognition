@@ -17,12 +17,19 @@ set -e
 chmod +x "$0"
 
 # =====================================================
-# 2. Load Defaults from .env file (if it exists)
+# 2. Setup .env file
 # =====================================================
-if [ -f "$(pwd)/.env" ]; then
+# Create .env from example if it doesn't exist
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    echo "Creating .env from .env.example..."
+    cp ".env.example" ".env"
+fi
+
+# Load Defaults from .env file
+if [ -f ".env" ]; then
     echo "Loading default variables from .env file..."
     set -o allexport
-    source "$(pwd)/.env"
+    source ".env"
     set +o allexport
 fi
 
@@ -44,6 +51,12 @@ INPUT_MP3_DIR=""
 # 4. Default output directory. Can be overridden by the 2nd command-line argument.
 OUTPUT_DIR=""
 
+# 5. Minimum number of speakers. Can be overridden by the 3rd command-line argument.
+MIN_SPEAKERS=2
+
+# 6. Maximum number of speakers. Can be overridden by the 4th command-line argument.
+MAX_SPEAKERS=3
+
 # --- END OF USER CONFIGURATION ---
 # =====================================================
 
@@ -52,6 +65,8 @@ export TORCH_AUDIO_BACKEND="soundfile"
 # Override config with command-line arguments (highest precedence)
 INPUT_MP3_DIR=${1:-$INPUT_MP3_DIR}
 OUTPUT_DIR=${2:-$OUTPUT_DIR}
+MIN_SPEAKERS=${3:-$MIN_SPEAKERS}
+MAX_SPEAKERS=${4:-$MAX_SPEAKERS}
 
 # =====================================================
 # 4. Validate Configuration
@@ -68,8 +83,8 @@ if [ ! -d "$SRC_DIR" ]; then
 fi
 
 if [ -z "$INPUT_MP3_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
-    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory>"
-    echo "Alternatively, edit the INPUT_MP3_DIR and OUTPUT_DIR variables inside the script."
+    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers]"
+    echo "Alternatively, edit the INPUT_MP3_DIR, OUTPUT_DIR, MIN_SPEAKERS, and MAX_SPEAKERS variables inside the script."
     exit 1
 fi
 
@@ -137,7 +152,7 @@ for mp3_file in "$INPUT_MP3_DIR"/*.mp3; do
         [[ -f "$chunk" ]] || continue
         CHUNK_BASENAME=$(basename "$chunk" .mp3)
         echo "→ Processing: $CHUNK_BASENAME"
-        speech-pipeline process "$chunk" --output "$SRT_DIR/${CHUNK_BASENAME}.srt"
+        speech-pipeline process "$chunk" --output "$SRT_DIR/${CHUNK_BASENAME}.srt" --min-speakers "$MIN_SPEAKERS" --max-speakers "$MAX_SPEAKERS"
     done
 
     # --- Merge SRTs with corrected timestamps ---
