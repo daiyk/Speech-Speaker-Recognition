@@ -163,7 +163,7 @@ class AudioProcessor:
                 return False
             
             # Check file extension
-            valid_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aac', '.wma'}
+            valid_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.aac', '.wma'}
             if audio_file.suffix.lower() not in valid_extensions:
                 logger.warning(f"Unsupported audio format: {audio_file.suffix}")
                 return False

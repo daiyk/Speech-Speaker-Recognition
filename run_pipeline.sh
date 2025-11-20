@@ -46,10 +46,10 @@ export HUGGINGFACE_TOKEN="your_token_here"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 3. (Required) Default input directory containing .mp3 files. Can be overridden by the 1st command-line argument.
-INPUT_MP3_DIR=""
+INPUT_AUDIO_DIR=""
 
-# 4. Default output directory, default to INPUT_MP3_DIR/output Can be overridden by the 2nd command-line argument.
-OUTPUT_DIR="${INPUT_MP3_DIR}/output"
+# 4. Default output directory, default to INPUT_AUDIO_DIR/output Can be overridden by the 2nd command-line argument.
+OUTPUT_DIR="${INPUT_AUDIO_DIR}/output"
 
 # 5. Minimum number of speakers. Can be overridden by the 3rd command-line argument.
 MIN_SPEAKERS=2
@@ -66,7 +66,7 @@ CHUNK_LENGTH=60
 export TORCH_AUDIO_BACKEND="soundfile"
 
 # Override config with command-line arguments (highest precedence)
-INPUT_MP3_DIR=${1:-$INPUT_MP3_DIR}
+INPUT_AUDIO_DIR=${1:-$INPUT_AUDIO_DIR}
 OUTPUT_DIR=${2:-$OUTPUT_DIR}
 MIN_SPEAKERS=${3:-$MIN_SPEAKERS}
 MAX_SPEAKERS=${4:-$MAX_SPEAKERS}
@@ -86,14 +86,14 @@ if [ ! -d "$SRC_DIR" ]; then
     exit 1
 fi
 
-if [ -z "$INPUT_MP3_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
+if [ -z "$INPUT_AUDIO_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
     echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers] [chunk_length_in_seconds]"
-    echo "Alternatively, edit the INPUT_MP3_DIR, OUTPUT_DIR, MIN_SPEAKERS, MAX_SPEAKERS, and CHUNK_LENGTH variables inside the script."
+    echo "Alternatively, edit the INPUT_AUDIO_DIR, OUTPUT_DIR, MIN_SPEAKERS, MAX_SPEAKERS, and CHUNK_LENGTH variables inside the script."
     exit 1
 fi
 
-if [ ! -d "$INPUT_MP3_DIR" ]; then
-    echo "ERROR: Input directory '$INPUT_MP3_DIR' not found."
+if [ ! -d "$INPUT_AUDIO_DIR" ]; then
+    echo "ERROR: Input directory '$INPUT_AUDIO_DIR' not found."
     exit 1
 fi
 
@@ -129,10 +129,10 @@ source .venv/bin/activate
 # =====================================================
 # 6. Process All MP3 Files in Directory
 # =====================================================
-for mp3_file in "$INPUT_MP3_DIR"/*.mp3; do
+for mp3_file in "$INPUT_AUDIO_DIR"/*.mp3; do
     # If no mp3 files are found, the loop will run once with a non-existent path
     if [ ! -f "$mp3_file" ]; then
-        echo "No .mp3 files found in $INPUT_MP3_DIR. Exiting."
+        echo "No .mp3 files found in $INPUT_AUDIO_DIR. Exiting."
         continue
     fi
 
