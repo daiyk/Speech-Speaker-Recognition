@@ -34,10 +34,10 @@ def cli(verbose: bool, quiet: bool) -> None:
 @click.option('--output', '-o', type=click.Path(path_type=Path), help='Output file path')
 @click.option('--format', '-f', 'output_format', 
               type=click.Choice(['srt', 'vtt', 'json']), 
-              default='srt', help='Output format')
+              default=None, help='Output format')
 @click.option('--whisper-model', '-w', 
               type=click.Choice(['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3']),
-              default='base', help='Whisper model to use')
+              default=None, help='Whisper model to use')
 @click.option('--pyannote-model', 
               type=str,
               help='Pyannote diarization model to use (overrides config)')
@@ -53,8 +53,8 @@ def cli(verbose: bool, quiet: bool) -> None:
 def process(
     input_file: Path,
     output: Optional[Path],
-    output_format: str,
-    whisper_model: str,
+    output_format: Optional[str],
+    whisper_model: Optional[str],
     pyannote_model: Optional[str],
     speaker_label_prefix: Optional[str],
     min_speakers: Optional[int],
@@ -71,8 +71,10 @@ def process(
             pipeline_config = Config.from_env()
         
         # Override config with command-line options
-        pipeline_config.whisper_model = whisper_model
-        pipeline_config.output_format = output_format
+        if whisper_model:
+            pipeline_config.whisper_model = whisper_model
+        if output_format:
+            pipeline_config.output_format = output_format
         if pyannote_model:
             pipeline_config.pyannote_model = pyannote_model
         if speaker_label_prefix:
@@ -82,22 +84,21 @@ def process(
         logger.info("Initializing speech pipeline...")
         pipeline = SpeechPipeline(
             config=pipeline_config,
-            device=device,
-            pyannote_model=pyannote_model
+            device=device
         )
         
         # Determine output path
         if output is None:
-            output = input_file.with_suffix(f'.{output_format}')
+            output = input_file.with_suffix(f'.{pipeline_config.output_format}')
         
         # Process audio
         logger.info(f"Processing {input_file}...")
         result = pipeline.process(
             str(input_file),
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
+            min_speakers=min_speakers if min_speakers is not None else pipeline_config.min_speakers,
+            max_speakers=max_speakers if max_speakers is not None else pipeline_config.max_speakers,
             output_path=str(output),
-            output_format=output_format
+            output_format=pipeline_config.output_format
         )
         
         # Print summary
