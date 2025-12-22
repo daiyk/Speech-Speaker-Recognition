@@ -99,13 +99,54 @@ fi
 
 # Check for ffmpeg installation
 if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo "!!! ERROR: ffmpeg is not installed or not in your PATH."
-    echo "!!! Please install it to proceed."
-    echo "!!! On macOS (using Homebrew): brew install ffmpeg"
-    echo "!!! On Debian/Ubuntu: sudo apt-get install ffmpeg"
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    exit 1
+    echo "ffmpeg not found. Attempting to install..."
+    OS="$(uname -s)"
+    case "${OS}" in
+        Linux*)
+            if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update && sudo apt-get install -y ffmpeg
+            elif command -v yum >/dev/null 2>&1; then
+                sudo yum install -y ffmpeg
+            elif command -v dnf >/dev/null 2>&1; then
+                sudo dnf install -y ffmpeg
+            elif command -v pacman >/dev/null 2>&1; then
+                sudo pacman -S --noconfirm ffmpeg
+            elif command -v apk >/dev/null 2>&1; then
+                sudo apk add ffmpeg
+            else
+                echo "Could not detect package manager. Please install ffmpeg manually."
+                exit 1
+            fi
+            ;;
+        Darwin*)
+            if command -v brew >/dev/null 2>&1; then
+                brew install ffmpeg
+            else
+                echo "Homebrew not found. Please install Homebrew or ffmpeg manually."
+                exit 1
+            fi
+            ;;
+        CYGWIN*|MINGW*|MSYS*)
+            if command -v choco >/dev/null 2>&1; then
+                choco install ffmpeg
+            elif command -v winget >/dev/null 2>&1; then
+                winget install ffmpeg
+            else
+                echo "Please install ffmpeg manually on Windows."
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Unsupported OS: ${OS}. Please install ffmpeg manually."
+            exit 1
+            ;;
+    esac
+
+    # Verify installation
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        echo "ffmpeg installation failed. Please install it manually."
+        exit 1
+    fi
 fi
 
 # =====================================================
@@ -124,7 +165,14 @@ echo "Syncing dependencies..."
 uv sync
 
 echo "Activating virtual environment..."
-source .venv/bin/activate
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+elif [ -f ".venv/Scripts/activate" ]; then
+    source .venv/Scripts/activate
+else
+    echo "Error: Virtual environment activation script not found."
+    exit 1
+fi
 
 # =====================================================
 # 6. Process All MP3 Files in Directory

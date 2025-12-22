@@ -19,10 +19,19 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 - GPU support optional but recommended for faster processing
 
 ## Quick Start
-`run_pipeline.sh` provides a convenient and easy-to-follow guided way to do large amount of audio transcription, please edit this `.sh` to fill up required variables (setp 3) and set it executable before running ".run_pipeline.sh":
+`run_pipeline.sh` provides a convenient and easy-to-follow guided way to do large amount of audio transcription.
+
+**Note for Windows Users:** You need to install [Git Bash](https://gitforwindows.org/), and run the script inside Git Bash terminal.
+
+Please first finish Step 1 and Step 2 under Installation, then edit this `.sh` to fill up required variables (step 3) and set it executable before running `./run_pipeline.sh`:
 ```
 chmod +x run_pipeline.sh
 ```
+Then simply run:
+```
+./run_pipeline.sh
+```
+
 ## Installation
 
 1. **Install uv** (if not already installed):
@@ -63,8 +72,23 @@ chmod +x run_pipeline.sh
    ```
 
    **Required Parameters:**
-   - `HUGGINGFACE_TOKEN`: Get from [Hugging Face](https://huggingface.co/) → Settings → Access Tokens
-   - Accept license at [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - `HUGGINGFACE_TOKEN`: Your Hugging Face access token. See setup instructions below.
+
+   #### Hugging Face Setup Guide
+
+   **1. Get your Access Token:**
+   1. Go to [Hugging Face website](https://huggingface.co/).
+   2. Login or register an account.
+   3. Click the top right corner profile icon -> **Access Tokens** -> **"Create new token"**.
+   4. Ensure boxes under **"User Permissions"** -> **"Repositories"** are ticked:
+      - "Read access to contents of all repos under your personal namespace"
+      - "Read access to contents of all public gated repos you can access"
+   5. Click **Create token**, copy paste the token. You only have one chance to see this token!
+
+   **2. Accept Model License:**
+   1. Go to the model card: [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1).
+   2. Fill up the form "You need to agree to share your contact information to access this model" and submit.
+   3. (Optional) You might also need to do the same for [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
 
    **Optional Parameters:**
    - `WHISPER_MODEL`: Model size (tiny, base, small, medium, large, large-v2, large-v3)
