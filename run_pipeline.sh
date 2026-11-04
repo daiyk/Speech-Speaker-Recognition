@@ -6,7 +6,9 @@
 #
 # This script processes all .mp3 files in a specified directory. For each file,
 # it splits it into smaller chunks, runs the speech-pipeline on each chunk,
-# and then merges the resulting SRT files into a single, time-corrected output.
+# and then merges the results into a single output:
+#   - diarize / timestamps mode: one time-corrected .srt file
+#   - transcribe mode:           one plain-text .txt file
 # ==============================================================================
 
 set -e
@@ -39,7 +41,13 @@ fi
 # --- EDIT THE VARIABLES BELOW ---
 # These variables will override any values set in the .env file.
 
-# 1. (Required) Your Hugging Face API token, refer to README.md of this project to see the guideline
+# 0. Pipeline mode. Can be overridden by the 6th command-line argument.
+#    transcribe - speech recognition only (plain text, .txt)
+#    timestamps - speech recognition + timestamps (.srt, no speaker labels)
+#    diarize    - full pipeline with speaker diarization (.srt, needs HUGGINGFACE_TOKEN)
+PIPELINE_MODE="${PIPELINE_MODE:-diarize}"
+
+# 1. (Required for diarize mode only) Your Hugging Face API token, refer to README.md of this project to see the guideline
 export HUGGINGFACE_TOKEN="your_token_here"
 
 # 2. The absolute path to the Speech-Speaker-Recognition project directory, default to current file's directory.
@@ -51,10 +59,10 @@ INPUT_AUDIO_DIR=""
 # 4. Default output directory, default to INPUT_AUDIO_DIR/output Can be overridden by the 2nd command-line argument.
 OUTPUT_DIR="${INPUT_AUDIO_DIR}/output"
 
-# 5. Minimum number of speakers. Can be overridden by the 3rd command-line argument.
+# 5. Minimum number of speakers (diarize mode only). Can be overridden by the 3rd command-line argument.
 MIN_SPEAKERS=2
 
-# 6. Maximum number of speakers. Can be overridden by the 4th command-line argument.
+# 6. Maximum number of speakers (diarize mode only). Can be overridden by the 4th command-line argument.
 MAX_SPEAKERS=3
 
 # 7. Chunk length in seconds. Can be overridden by the 5th command-line argument.
@@ -71,14 +79,28 @@ OUTPUT_DIR=${2:-$OUTPUT_DIR}
 MIN_SPEAKERS=${3:-$MIN_SPEAKERS}
 MAX_SPEAKERS=${4:-$MAX_SPEAKERS}
 CHUNK_LENGTH=${5:-$CHUNK_LENGTH}
+PIPELINE_MODE=${6:-$PIPELINE_MODE}
 
 # =====================================================
 # 4. Validate Configuration
 # =====================================================
-if [ "$HUGGINGFACE_TOKEN" == "your_token_here" ] || [ -z "$HUGGINGFACE_TOKEN" ]; then
-    echo "ERROR: Hugging Face token not set. Edit this script to set the HUGGINGFACE_TOKEN variable."
-    echo "You must also accept the pyannote license at: https://huggingface.co/pyannote/speaker-diarization-3.1"
-    exit 1
+case "$PIPELINE_MODE" in
+    transcribe) OUT_EXT="txt" ;;
+    timestamps|diarize) OUT_EXT="srt" ;;
+    *)
+        echo "ERROR: Invalid PIPELINE_MODE '$PIPELINE_MODE'. Use one of: transcribe, timestamps, diarize."
+        exit 1
+        ;;
+esac
+export PIPELINE_MODE
+
+if [ "$PIPELINE_MODE" == "diarize" ]; then
+    if [ "$HUGGINGFACE_TOKEN" == "your_token_here" ] || [ -z "$HUGGINGFACE_TOKEN" ]; then
+        echo "ERROR: Hugging Face token not set. Edit this script to set the HUGGINGFACE_TOKEN variable."
+        echo "You must also accept the pyannote license at: https://huggingface.co/pyannote/speaker-diarization-3.1"
+        echo "Or set PIPELINE_MODE to 'transcribe' or 'timestamps' to skip speaker diarization."
+        exit 1
+    fi
 fi
 
 if [ ! -d "$SRC_DIR" ]; then
@@ -87,8 +109,8 @@ if [ ! -d "$SRC_DIR" ]; then
 fi
 
 if [ -z "$INPUT_AUDIO_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
-    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers] [chunk_length_in_seconds]"
-    echo "Alternatively, edit the INPUT_AUDIO_DIR, OUTPUT_DIR, MIN_SPEAKERS, MAX_SPEAKERS, and CHUNK_LENGTH variables inside the script."
+    echo "Usage: $0 <path/to/input_directory> <path/to/output_directory> [min_speakers] [max_speakers] [chunk_length_in_seconds] [mode]"
+    echo "Alternatively, edit the INPUT_AUDIO_DIR, OUTPUT_DIR, MIN_SPEAKERS, MAX_SPEAKERS, CHUNK_LENGTH, and PIPELINE_MODE variables inside the script."
     exit 1
 fi
 
@@ -190,25 +212,47 @@ for mp3_file in "$INPUT_AUDIO_DIR"/*.mp3; do
 
     FILENAME=$(basename "$mp3_file")
     BASENAME="${FILENAME%.*}"
-    MERGED_DIR="$OUTPUT_DIR/final_srt"
+    MERGED_DIR="$OUTPUT_DIR/final_${OUT_EXT}"
 
     CHUNK_DIR="$SRC_DIR/chunks_temp"
-    SRT_DIR="$SRC_DIR/srt_temp"
+    SRT_DIR="$SRC_DIR/${OUT_EXT}_temp"
     mkdir -p "$CHUNK_DIR" "$SRT_DIR" "$MERGED_DIR"
 
     echo "Splitting $mp3_file into ${CHUNK_LENGTH}s chunks..."
     ffmpeg -i "$mp3_file" -f segment -segment_time "$CHUNK_LENGTH" -c copy "$CHUNK_DIR/${BASENAME}_%03d.mp3"
 
-    echo "Running speech-pipeline on each chunk..."
+    echo "Running speech-pipeline ($PIPELINE_MODE mode) on each chunk..."
+    SPEAKER_ARGS=()
+    if [ "$PIPELINE_MODE" == "diarize" ]; then
+        SPEAKER_ARGS=(--min-speakers "$MIN_SPEAKERS" --max-speakers "$MAX_SPEAKERS")
+    fi
     for chunk in $(ls "$CHUNK_DIR/${BASENAME}"_*.mp3 | sort); do
         [[ -f "$chunk" ]] || continue
         CHUNK_BASENAME=$(basename "$chunk" .mp3)
         echo "→ Processing: $CHUNK_BASENAME"
-        speech-pipeline process "$chunk" --output "$SRT_DIR/${CHUNK_BASENAME}.srt" --min-speakers "$MIN_SPEAKERS" --max-speakers "$MAX_SPEAKERS"
+        speech-pipeline process "$chunk" --mode "$PIPELINE_MODE" --format "$OUT_EXT" \
+            --output "$SRT_DIR/${CHUNK_BASENAME}.${OUT_EXT}" "${SPEAKER_ARGS[@]}"
     done
 
+    OUTPUT_FILE="$MERGED_DIR/$BASENAME.${OUT_EXT}"
+
+    if [ "$OUT_EXT" == "txt" ]; then
+        # --- Plain text: concatenate chunk transcripts in order ---
+        echo "Merging all transcripts into $OUTPUT_FILE"
+        > "$OUTPUT_FILE"
+        for txt_file in $(ls "$SRT_DIR/${BASENAME}"_*.txt | sort); do
+            echo "Adding $txt_file"
+            cat "$txt_file" >> "$OUTPUT_FILE"
+        done
+        echo "Merged transcript saved to: $OUTPUT_FILE"
+        echo "Cleaning up temporary files for $BASENAME..."
+        rm -rf "$CHUNK_DIR"
+        rm -rf "$SRT_DIR"
+        echo "Finished processing $BASENAME."
+        continue
+    fi
+
     # --- Merge SRTs with corrected timestamps ---
-    OUTPUT_FILE="$MERGED_DIR/$BASENAME.srt"
     echo "Merging all SRTs into $OUTPUT_FILE"
     > "$OUTPUT_FILE"
 

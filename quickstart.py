@@ -7,7 +7,8 @@ The script now supports two modes:
     synthesized six-second audio clip to showcase diarization and captions.
 
 Run it with: ``uv run python quickstart.py <audio-file>`` or add ``-demo`` to try the
-synthetic sample.
+synthetic sample. Add ``--mode transcribe`` or ``--mode timestamps`` to skip speaker
+diarization (no Hugging Face token or pyannote model needed).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from speech_pipeline import Config, SpeechPipeline
+from speech_pipeline.config import PIPELINE_MODES
 from speech_pipeline.models import SpeakerSegment
 
 
@@ -53,8 +55,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "-f",
         "--format",
-        choices=["srt", "vtt", "json"],
+        choices=["txt", "srt", "vtt", "json"],
         help="Override the configured output format.",
+    )
+    parser.add_argument(
+        "-m",
+        "--mode",
+        choices=list(PIPELINE_MODES),
+        help="Stages to run: transcribe, timestamps, or diarize (default: PIPELINE_MODE or diarize).",
     )
     parser.add_argument(
         "-demo",
@@ -67,13 +75,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(args_list)
 
 
-def check_dependencies() -> bool:
-    """Confirm that the runtime has all critical third-party packages."""
+def check_dependencies(need_diarization: bool) -> bool:
+    """Confirm that the runtime has the third-party packages the mode needs."""
 
     try:
         import torch  # noqa: F401
         import faster_whisper  # noqa: F401
-        import pyannote.audio  # noqa: F401
+        if need_diarization:
+            import pyannote.audio  # noqa: F401
         import librosa  # noqa: F401
         import soundfile  # noqa: F401
         import pydub  # noqa: F401
@@ -87,19 +96,28 @@ def check_dependencies() -> bool:
     return True
 
 
-def load_configuration() -> Config | None:
+def load_configuration(mode: str | None, output_format: str | None) -> Config | None:
     """Load and validate configuration from the environment."""
 
     try:
         config = Config.from_env()
+        if mode:
+            config.mode = mode
+        if output_format:
+            config.output_format = output_format
         config.validate()
     except Exception as exc:  # pragma: no cover - configuration guard
         logger.error("❌ Configuration error: %s", exc)
-        logger.info("   Check that HUGGINGFACE_TOKEN and OUTPUT_FORMAT are defined in your .env file.")
+        logger.info("   Check PIPELINE_MODE / OUTPUT_FORMAT in your .env file "
+                    "(and HUGGINGFACE_TOKEN for diarize mode).")
         return None
 
-    logger.info("✅ Configuration loaded for Whisper '%s' and pyannote '%s'.",
-                config.whisper_model, config.pyannote_model)
+    if config.diarization_enabled:
+        logger.info("✅ Configuration loaded: mode '%s', Whisper '%s', pyannote '%s'.",
+                    config.mode, config.whisper_model, config.pyannote_model)
+    else:
+        logger.info("✅ Configuration loaded: mode '%s', Whisper '%s' (diarization disabled).",
+                    config.mode, config.whisper_model)
     return config
 
 
@@ -117,13 +135,15 @@ def bootstrap_pipeline(base_config: Config, demo_mode: bool) -> SpeechPipeline |
         pipeline = SpeechPipeline(config=effective_config)
     except Exception as exc:  # pragma: no cover - heavy initialisation guard
         logger.error("❌ Failed to load models: %s", exc)
-        logger.info("   Confirm your Hugging Face token has access to %s.",
-                    effective_config.pyannote_model)
+        if effective_config.diarization_enabled:
+            logger.info("   Confirm your Hugging Face token has access to %s.",
+                        effective_config.pyannote_model)
         return None
 
     info = pipeline.get_model_info()
-    logger.info("✅ Pipeline ready on '%s' (Whisper=%s, Pyannote=%s).",
-                info["device"], info["whisper_model"], info["pyannote_model"])
+    logger.info("✅ Pipeline ready on '%s' (mode=%s, Whisper=%s, Pyannote=%s).",
+                info["device"], info["mode"], info["whisper_model"],
+                info["pyannote_model"] or "disabled")
     return pipeline
 
 
@@ -168,27 +188,38 @@ def print_segment_overview(segments: Iterable[SpeakerSegment]) -> None:
         end = segment.end
         text = segment.text or "[no transcription]"
         confidence = f"{segment.confidence:.2f}" if segment.confidence is not None else "--"
+        speaker = segment.speaker or "-"
         logger.info("%2d. %s | %6.2fs → %6.2fs | conf=%s\n    %s",
-                    index, segment.speaker, start, end, confidence, text)
+                    index, speaker, start, end, confidence, text)
+
+
+def summarise(pipeline: SpeechPipeline, result) -> None:
+    """Log a short summary of a pipeline result."""
+
+    if pipeline.config.diarization_enabled:
+        logger.info("\n✅ Transcription finished: %.2fs total, %d speakers, %d caption blocks.",
+                    result.total_duration, len(result.speakers), len(result.segments))
+    else:
+        logger.info("\n✅ Transcription finished (%s mode): %.2fs total, %d segments.",
+                    pipeline.config.mode, result.total_duration, len(result.segments))
+    print_segment_overview(result.segments[:5])
 
 
 def run_demo(pipeline: SpeechPipeline, tmp_dir: Path) -> None:
     """Execute the pipeline on generated audio and summarise the outcome."""
 
     demo_audio = generate_demo_audio(tmp_dir)
-    output_file = tmp_dir / "quickstart-output.srt"
+    output_format = pipeline.config.effective_output_format()
+    output_file = tmp_dir / f"quickstart-output.{output_format}"
 
     result = pipeline.process(
         str(demo_audio),
         output_path=str(output_file),
-        output_format="srt",
+        output_format=output_format,
     )
 
-    logger.info("\n✅ Transcription finished: %.2fs total, %d speakers, %d caption blocks.",
-                result.total_duration, len(result.speakers), len(result.segments))
-    print_segment_overview(result.segments[:5])
-
-    logger.info("\n📄 Full SRT saved to: %s", output_file)
+    summarise(pipeline, result)
+    logger.info("\n📄 Full %s saved to: %s", output_format, output_file)
 
 
 def run_pipeline(pipeline: SpeechPipeline, audio_path: Path, output_path: Path, output_format: str) -> None:
@@ -200,9 +231,7 @@ def run_pipeline(pipeline: SpeechPipeline, audio_path: Path, output_path: Path, 
         output_format=output_format,
     )
 
-    logger.info("\n✅ Transcription finished: %.2fs total, %d speakers, %d caption blocks.",
-                result.total_duration, len(result.speakers), len(result.segments))
-    print_segment_overview(result.segments[:5])
+    summarise(pipeline, result)
 
     logger.info("\n📄 Full %s saved to: %s", output_format, output_path)
 
@@ -218,11 +247,11 @@ def main(argv: Iterable[str] | None = None) -> None:
     else:
         logger.info("🎧 Processing user-supplied audio input.")
 
-    if not check_dependencies():
+    config = load_configuration(args.mode, args.format)
+    if config is None:
         return
 
-    config = load_configuration()
-    if config is None:
+    if not check_dependencies(need_diarization=config.diarization_enabled):
         return
 
     pipeline = bootstrap_pipeline(config, demo_mode=args.demo)
@@ -248,7 +277,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         logger.error("❌ Input audio not found at %s", input_path)
         return
 
-    output_format = args.format or config.output_format
+    output_format = config.effective_output_format()
     output_path = (
         Path(args.output).expanduser()
         if args.output

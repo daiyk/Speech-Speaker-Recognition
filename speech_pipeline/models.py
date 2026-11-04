@@ -12,7 +12,7 @@ class SpeakerSegment:
     
     start: float  # Start time in seconds
     end: float    # End time in seconds
-    speaker: str  # Speaker identifier
+    speaker: Optional[str]  # Speaker identifier (None when diarization is disabled)
     text: Optional[str] = None  # Transcribed text
     confidence: Optional[float] = None  # Confidence score
     audio_data: Optional[Any] = None  # Audio data for the segment
@@ -36,7 +36,7 @@ class SpeakerSegment:
 
 @dataclass
 class TranscriptionResult:
-    """Contains the complete transcription result with speaker diarization."""
+    """Contains the complete transcription result (speakers empty without diarization)."""
     
     segments: List[SpeakerSegment]
     total_duration: float
@@ -55,7 +55,7 @@ class TranscriptionResult:
             
             srt_content.append(f"{i}")
             srt_content.append(f"{start_time} --> {end_time}")
-            srt_content.append(f"{segment.speaker}: {segment.text}")
+            srt_content.append(self._caption_text(segment))
             srt_content.append("")
         
         return "\n".join(srt_content)
@@ -72,11 +72,16 @@ class TranscriptionResult:
             end_time = self._seconds_to_vtt_time(segment.end)
             
             vtt_content.append(f"{start_time} --> {end_time}")
-            vtt_content.append(f"{segment.speaker}: {segment.text}")
+            vtt_content.append(self._caption_text(segment))
             vtt_content.append("")
         
         return "\n".join(vtt_content)
     
+    def to_txt(self) -> str:
+        """Convert result to plain text, one segment per line (no timestamps)."""
+        lines = [self._caption_text(s) for s in self.segments if s.text]
+        return "\n".join(lines) + ("\n" if lines else "")
+
     def to_json(self, indent: int = 2) -> str:
         """Convert result to JSON format."""
         data = {
@@ -105,6 +110,13 @@ class TranscriptionResult:
         
         return stats
     
+    @staticmethod
+    def _caption_text(segment: SpeakerSegment) -> str:
+        """Caption line for a segment, prefixed with the speaker when known."""
+        if segment.speaker:
+            return f"{segment.speaker}: {segment.text}"
+        return segment.text or ""
+
     @staticmethod
     def _seconds_to_srt_time(seconds: float) -> str:
         """Convert seconds to SRT time format (HH:MM:SS,mmm)."""

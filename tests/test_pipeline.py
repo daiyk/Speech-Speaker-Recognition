@@ -17,9 +17,11 @@ class TestConfig:
     def test_default_config(self):
         """Test default configuration values."""
         config = Config()
+        assert config.mode == "diarize"
         assert config.whisper_model == "base"
         assert config.pyannote_model == "pyannote/speaker-diarization-3.1"
-        assert config.output_format == "srt"
+        assert config.output_format is None
+        assert config.effective_output_format() == "srt"
         assert config.speaker_labels == "Speaker"
     
     def test_config_validation(self):
@@ -38,6 +40,38 @@ class TestConfig:
         config.whisper_model = "invalid_model"
         with pytest.raises(ValueError, match="Invalid Whisper model"):
             config.validate()
+
+    @pytest.mark.parametrize("mode", ["transcribe", "timestamps"])
+    def test_no_token_needed_without_diarization(self, mode):
+        """Modes without diarization must not require a Hugging Face token."""
+        config = Config(mode=mode)
+        config.validate()  # Should not raise
+        assert not config.diarization_enabled
+
+    def test_mode_default_output_formats(self):
+        assert Config(mode="transcribe").effective_output_format() == "txt"
+        assert Config(mode="timestamps").effective_output_format() == "srt"
+        assert Config(mode="diarize").effective_output_format() == "srt"
+
+    def test_invalid_mode(self):
+        with pytest.raises(ValueError, match="Invalid pipeline mode"):
+            Config(mode="everything").validate()
+
+    def test_transcribe_rejects_subtitle_formats(self):
+        with pytest.raises(ValueError, match="Invalid output format 'srt' for mode 'transcribe'"):
+            Config(mode="transcribe", output_format="srt").validate()
+
+    def test_from_env_mode(self, monkeypatch, tmp_path):
+        """PIPELINE_MODE and an empty OUTPUT_FORMAT are read from the env file."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("PIPELINE_MODE=Timestamps\nOUTPUT_FORMAT=\nMIN_SPEAKERS=\n")
+        for key in ("PIPELINE_MODE", "OUTPUT_FORMAT", "MIN_SPEAKERS", "HUGGINGFACE_TOKEN"):
+            monkeypatch.delenv(key, raising=False)
+        config = Config.from_env(str(env_file))
+        assert config.mode == "timestamps"
+        assert config.output_format is None
+        assert config.min_speakers is None
+        config.validate()
 
 
 class TestSpeakerSegment:
@@ -129,6 +163,28 @@ class TestTranscriptionResult:
         assert len(data["segments"]) == 3
         assert data["segments"][0]["text"] == "Hello there"
     
+    def test_to_txt(self, sample_result):
+        assert sample_result.to_txt() == (
+            "Speaker 1: Hello there\nSpeaker 2: How are you?\nSpeaker 1: I'm doing well\n"
+        )
+
+    def test_outputs_without_speakers(self):
+        """Without diarization, captions carry no speaker prefix."""
+        result = TranscriptionResult(
+            segments=[
+                SpeakerSegment(0.0, 1.5, None, "Hello there"),
+                SpeakerSegment(1.5, 3.0, None, "How are you?"),
+            ],
+            total_duration=3.0,
+            speakers=[],
+        )
+        assert result.to_txt() == "Hello there\nHow are you?\n"
+        srt = result.to_srt()
+        assert "00:00:00,000 --> 00:00:01,500\nHello there" in srt
+        assert "None" not in srt and ":" not in srt.split("\n")[2]
+        assert "00:00:01.500 --> 00:00:03.000\nHow are you?" in result.to_vtt()
+        assert result.get_speaker_stats() == {}
+
     def test_speaker_stats(self, sample_result):
         """Test speaker statistics calculation."""
         stats = sample_result.get_speaker_stats()
@@ -204,7 +260,7 @@ class TestSpeechPipeline:
         config.whisper_model = "base"
         return config
     
-    @patch('speech_pipeline.pipeline.PyannnotePipeline.from_pretrained')
+    @patch('pyannote.audio.Pipeline.from_pretrained')
     @patch('speech_pipeline.pipeline.WhisperModel')
     def test_pipeline_initialization(self, mock_whisper_cls, mock_pyannote_from_pretrained, mock_config):
         """Test pipeline initialization."""
@@ -225,7 +281,7 @@ class TestSpeechPipeline:
     def test_get_model_info(self, mock_config):
         """Test model information retrieval."""
         with patch('speech_pipeline.pipeline.WhisperModel') as mock_whisper_cls, \
-             patch('speech_pipeline.pipeline.PyannnotePipeline.from_pretrained') as mock_pyannote_from_pretrained:
+             patch('pyannote.audio.Pipeline.from_pretrained') as mock_pyannote_from_pretrained:
             mock_whisper_instance = Mock()
             mock_whisper_instance.transcribe.return_value = ([], {})
             mock_whisper_cls.return_value = mock_whisper_instance
@@ -240,6 +296,68 @@ class TestSpeechPipeline:
             assert "pyannote_model" in info
             assert "device" in info
             assert "sample_rate" in info
+            assert info["mode"] == "diarize"
+
+    @staticmethod
+    def _fake_whisper():
+        """Whisper mock returning two segments (no word timestamps)."""
+        from types import SimpleNamespace
+
+        segments = [
+            SimpleNamespace(start=0.0, end=1.5, text=" Hello there.", words=None, avg_logprob=-0.1),
+            SimpleNamespace(start=1.5, end=2.5, text=" How are you?", words=None, avg_logprob=-0.2),
+        ]
+        whisper = Mock()
+        whisper.transcribe.return_value = (iter(segments), {})
+        return whisper
+
+    @staticmethod
+    def _write_wav(path: Path) -> Path:
+        import soundfile as sf
+
+        sf.write(path, np.zeros(16000 * 3, dtype=np.float32), 16000)
+        return path
+
+    @pytest.mark.parametrize(
+        "mode,expected_suffix,expected_text",
+        [
+            ("transcribe", ".txt", "Hello there.\nHow are you?\n"),
+            ("timestamps", ".srt", "00:00:00,000 --> 00:00:01,500\nHello there."),
+        ],
+    )
+    def test_modes_without_diarization(self, mode, expected_suffix, expected_text, tmp_path, monkeypatch):
+        """transcribe/timestamps never touch pyannote or the Hugging Face token."""
+        from speech_pipeline.pipeline import SpeechPipeline
+
+        monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+        config = Config(mode=mode)  # no token at all
+        audio = self._write_wav(tmp_path / "in.wav")
+
+        with patch('speech_pipeline.pipeline.WhisperModel', return_value=self._fake_whisper()) as mock_whisper_cls, \
+             patch('pyannote.audio.Pipeline.from_pretrained') as mock_pyannote_from_pretrained:
+            pipeline = SpeechPipeline(config=config, device="cpu")
+            result = pipeline.process(str(audio), min_speakers=2, output_path=str(tmp_path / "out"))
+
+        mock_pyannote_from_pretrained.assert_not_called()
+        assert pipeline.diarization_pipeline is None
+        assert pipeline.get_model_info()["pyannote_model"] is None
+        _, kwargs = mock_whisper_cls.return_value.transcribe.call_args
+        assert kwargs["word_timestamps"] is False
+
+        assert result.speakers == []
+        assert [s.speaker for s in result.segments] == [None, None]
+        assert [s.text for s in result.segments] == ["Hello there.", "How are you?"]
+
+        out_file = (tmp_path / "out").with_suffix(expected_suffix)
+        assert expected_text in out_file.read_text()
+
+    def test_mode_override_argument(self, mock_config):
+        with patch('speech_pipeline.pipeline.WhisperModel'), \
+             patch('pyannote.audio.Pipeline.from_pretrained') as mock_pyannote_from_pretrained:
+            from speech_pipeline.pipeline import SpeechPipeline
+            pipeline = SpeechPipeline(config=mock_config, mode="timestamps", device="cpu")
+        assert pipeline.mode == "timestamps"
+        mock_pyannote_from_pretrained.assert_not_called()
 
 
 if __name__ == "__main__":

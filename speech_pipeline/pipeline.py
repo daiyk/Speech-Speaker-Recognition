@@ -20,7 +20,8 @@ try:
     torch.backends.cudnn.allow_tf32 = False
 
     from faster_whisper import WhisperModel
-    from pyannote.audio import Pipeline as PyannnotePipeline
+    # Lightweight data structures only; pyannote.audio (the diarization model
+    # stack) is imported lazily, and only when diarization is enabled.
     from pyannote.core import Annotation, Segment
 
     # Filter out repetitive deprecation warnings
@@ -40,14 +41,24 @@ logger = logging.getLogger(__name__)
 
 
 class SpeechPipeline:
-    """Complete pipeline for speech recognition and speaker diarization."""
+    """Speech recognition pipeline with optional timestamps and speaker diarization.
+
+    Modes (``config.mode``):
+      * ``transcribe`` - Whisper only, plain-text transcript
+      * ``timestamps`` - Whisper with segment timestamps (SRT/VTT/JSON/TXT)
+      * ``diarize``    - full pipeline: Whisper word timestamps + pyannote speakers
+
+    The pyannote model and Hugging Face token are only loaded/checked in
+    ``diarize`` mode.
+    """
     
     def __init__(
         self,
         config: Optional[Config] = None,
         whisper_model: Optional[str] = None,
         pyannote_model: Optional[str] = None,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        mode: Optional[str] = None,
     ):
         """
         Initialize the speech pipeline.
@@ -57,10 +68,13 @@ class SpeechPipeline:
             whisper_model: Whisper model name override
             pyannote_model: Pyannote model name override
             device: Device to run models on ('cpu', 'cuda', 'mps')
+            mode: Pipeline mode override ('transcribe', 'timestamps', 'diarize')
         """
         self.config = config or Config.from_env()
 
-        # Override model names if provided
+        # Override settings if provided
+        if mode:
+            self.config.mode = mode.lower()
         if whisper_model:
             self.config.whisper_model = whisper_model
         if pyannote_model:
@@ -89,7 +103,7 @@ class SpeechPipeline:
 
         self.device = resolved_device
         
-        logger.info(f"Using device: {self.device}")
+        logger.info(f"Using device: {self.device} (mode: {self.config.mode})")
         
         # Initialize components
         self.audio_processor = AudioProcessor(sample_rate=self.config.sample_rate)
@@ -99,8 +113,13 @@ class SpeechPipeline:
         # Load models
         self._load_models()
     
+    @property
+    def mode(self) -> str:
+        """Active pipeline mode."""
+        return self.config.mode
+
     def _load_models(self) -> None:
-        """Load Whisper and pyannote models."""
+        """Load Whisper, plus pyannote when diarization is enabled."""
         logger.info("Loading models...")
         
         # Load Faster Whisper model
@@ -125,10 +144,23 @@ class SpeechPipeline:
         except Exception as e:
             raise RuntimeError(f"Failed to load Faster Whisper model: {e}")
         
-        # Load pyannote diarization pipeline
+        if self.config.diarization_enabled:
+            self._load_diarization_pipeline()
+        else:
+            logger.info("Speaker diarization disabled: skipping pyannote model.")
+
+    def _load_diarization_pipeline(self) -> None:
+        """Load the pyannote diarization pipeline (diarize mode only)."""
+        try:
+            from pyannote.audio import Pipeline as PyannotePipeline
+        except ImportError as e:
+            raise ImportError(
+                "pyannote.audio is required for speaker diarization. Please run: uv sync"
+            ) from e
+
         try:
             logger.info(f"Loading pyannote model: {self.config.pyannote_model}")
-            self.diarization_pipeline = PyannnotePipeline.from_pretrained(
+            self.diarization_pipeline = PyannotePipeline.from_pretrained(
                 self.config.pyannote_model,
                 use_auth_token=self.config.huggingface_token
             )
@@ -155,14 +187,14 @@ class SpeechPipeline:
         diarization_output_format: str = "txt"
     ) -> TranscriptionResult:
         """
-        Process audio file with speaker diarization and speech recognition.
+        Process an audio file according to the configured mode.
         
         Args:
             audio_path: Path to input audio file
-            min_speakers: Minimum number of speakers (optional)
-            max_speakers: Maximum number of speakers (optional)
+            min_speakers: Minimum number of speakers (diarize mode only)
+            max_speakers: Maximum number of speakers (diarize mode only)
             output_path: Path to save transcription output file (optional)
-            output_format: Transcription output format ('srt', 'vtt', 'json')
+            output_format: Transcription output format ('txt', 'srt', 'vtt', 'json')
             diarization_output_path: Directory or base path for diarization output (if None, automatically saved next to audio)
             diarization_output_format: 'txt' (default), 'rttm', or 'json'
             
@@ -177,7 +209,50 @@ class SpeechPipeline:
         
         # Load audio
         total_duration = self.audio_processor.get_audio_duration(audio_path)
+
+        if self.config.diarization_enabled:
+            transcribed_segments = self._process_with_diarization(
+                audio_path,
+                min_speakers,
+                max_speakers,
+                diarization_output_path,
+                diarization_output_format,
+            )
+        else:
+            if min_speakers is not None or max_speakers is not None:
+                logger.info("Ignoring min/max speakers: diarization is disabled in mode '%s'", self.mode)
+            logger.info("Performing speech recognition...")
+            whisper_segments = self._transcribe_audio(audio_path, word_timestamps=False)
+            transcribed_segments = self._segments_without_speakers(whisper_segments)
+
+        # Create result
+        speakers = sorted({s.speaker for s in transcribed_segments if s.speaker})
+
+        result = TranscriptionResult(
+            segments=transcribed_segments,
+            total_duration=total_duration,
+            speakers=speakers
+        )
         
+        # Save output if requested
+        if output_path:
+            self._save_result(result, output_path, output_format)
+        
+        if self.config.diarization_enabled:
+            logger.info(f"Processing completed. Found {len(speakers)} speakers in {total_duration:.2f}s audio")
+        else:
+            logger.info(f"Processing completed. {len(transcribed_segments)} segments in {total_duration:.2f}s audio")
+        return result
+
+    def _process_with_diarization(
+        self,
+        audio_path: str,
+        min_speakers: Optional[int],
+        max_speakers: Optional[int],
+        diarization_output_path: Optional[str],
+        diarization_output_format: str,
+    ) -> List[SpeakerSegment]:
+        """Full pipeline: diarization + word-level transcription + speaker merge."""
         # Perform speaker diarization
         logger.info("Performing speaker diarization...")
         diarization = self._perform_diarization(
@@ -209,7 +284,7 @@ class SpeechPipeline:
         
         # Perform speech recognition over full audio
         logger.info("Performing speech recognition...")
-        whisper_segments = self._transcribe_audio(audio_path)
+        whisper_segments = self._transcribe_audio(audio_path, word_timestamps=True)
 
         # Word-level speaker attribution & regrouping
         # (Falls back to segment-level merge if no word timestamps are available)
@@ -220,23 +295,7 @@ class SpeechPipeline:
             transcribed_segments = self._merge_diarization_and_transcription(
                 diarization, whisper_segments
             )
-        
-        # Create result
-        speakers = list(set(segment.speaker for segment in transcribed_segments))
-        speakers.sort()  # Sort for consistent ordering
-        
-        result = TranscriptionResult(
-            segments=transcribed_segments,
-            total_duration=total_duration,
-            speakers=speakers
-        )
-        
-        # Save output if requested
-        if output_path:
-            self._save_result(result, output_path, output_format)
-        
-        logger.info(f"Processing completed. Found {len(speakers)} speakers in {total_duration:.2f}s audio")
-        return result
+        return transcribed_segments
     
     def _perform_diarization(
         self,
@@ -401,8 +460,14 @@ class SpeechPipeline:
             raise ValueError("Significant sample mismatch detected")
         return True
     
-    def _transcribe_audio(self, audio_path: str) -> List[Dict[str, Any]]:
-        """Run Whisper transcription over the full audio file."""
+    def _transcribe_audio(
+        self, audio_path: str, word_timestamps: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Run Whisper transcription over the full audio file.
+
+        Word timestamps are only needed for word-level speaker attribution, so
+        modes without diarization skip them (faster).
+        """
 
         if self.whisper_model is None:
             raise RuntimeError("Whisper model not loaded")
@@ -411,7 +476,7 @@ class SpeechPipeline:
             whisper_segments, _ = self.whisper_model.transcribe(
                 audio_path,
                 language=None,
-                word_timestamps=True,
+                word_timestamps=word_timestamps,
             )
         except Exception as exc:  # pragma: no cover - safety belt
             raise RuntimeError(f"Failed to transcribe audio: {exc}") from exc
@@ -450,6 +515,33 @@ class SpeechPipeline:
             )
 
         return processed_segments
+
+    @staticmethod
+    def _segments_without_speakers(
+        whisper_segments: List[Dict[str, Any]],
+    ) -> List[SpeakerSegment]:
+        """Convert Whisper segments to result segments with no speaker labels."""
+        segments: List[SpeakerSegment] = []
+        for entry in whisper_segments:
+            seg: Segment = entry["segment"]
+            confidence = None
+            avg_lp = entry.get("avg_logprob")
+            if avg_lp is not None:
+                try:
+                    confidence = math.exp(float(avg_lp))
+                except Exception:  # pragma: no cover - safety belt
+                    confidence = None
+            segments.append(
+                SpeakerSegment(
+                    start=float(seg.start),
+                    end=float(seg.end),
+                    speaker=None,
+                    text=entry["text"],
+                    confidence=confidence,
+                )
+            )
+        segments.sort(key=lambda s: s.start)
+        return segments
 
     def _merge_diarization_and_transcription(
         self,
@@ -781,26 +873,23 @@ class SpeechPipeline:
         output_format: Optional[str]
     ) -> None:
         """Save transcription result to file."""
-        format_name = output_format or self.config.output_format
-        output_file = Path(output_path)
-        
-        # Ensure correct file extension
-        if format_name == "srt" and output_file.suffix != ".srt":
-            output_file = output_file.with_suffix(".srt")
-        elif format_name == "vtt" and output_file.suffix != ".vtt":
-            output_file = output_file.with_suffix(".vtt")
-        elif format_name == "json" and output_file.suffix != ".json":
-            output_file = output_file.with_suffix(".json")
-        
-        # Generate content
-        if format_name == "srt":
-            content = result.to_srt()
-        elif format_name == "vtt":
-            content = result.to_vtt()
-        elif format_name == "json":
-            content = result.to_json()
-        else:
+        format_name = (output_format or self.config.effective_output_format()).lower()
+        renderers = {
+            "txt": result.to_txt,
+            "srt": result.to_srt,
+            "vtt": result.to_vtt,
+            "json": result.to_json,
+        }
+        if format_name not in renderers:
             raise ValueError(f"Unsupported output format: {format_name}")
+
+        # Ensure correct file extension
+        output_file = Path(output_path)
+        if output_file.suffix.lower() != f".{format_name}":
+            output_file = output_file.with_suffix(f".{format_name}")
+
+        # Generate content
+        content = renderers[format_name]()
         
         # Save to file
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -878,8 +967,9 @@ class SpeechPipeline:
     def get_model_info(self) -> dict:
         """Get information about loaded models."""
         return {
+            "mode": self.config.mode,
             "whisper_model": self.config.whisper_model,
-            "pyannote_model": self.config.pyannote_model,
+            "pyannote_model": self.config.pyannote_model if self.config.diarization_enabled else None,
             "device": self.device,
             "sample_rate": self.config.sample_rate
         }

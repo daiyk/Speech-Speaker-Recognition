@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import Optional
 import click
 
-from .pipeline import SpeechPipeline
-from .config import Config
+from .config import Config, PIPELINE_MODES, MODE_DIARIZE
 
 
 # Setup logging
@@ -31,10 +30,16 @@ def cli(verbose: bool, quiet: bool) -> None:
 
 @cli.command()
 @click.argument('input_file', type=click.Path(exists=True, path_type=Path))
+@click.option('--mode', '-m',
+              type=click.Choice(list(PIPELINE_MODES)),
+              default=None,
+              help='Stages to run: transcribe (text only), timestamps (text + '
+                   'timestamps), diarize (full pipeline with speakers; needs '
+                   'HUGGINGFACE_TOKEN). Default: PIPELINE_MODE from config, else diarize.')
 @click.option('--output', '-o', type=click.Path(path_type=Path), help='Output file path')
 @click.option('--format', '-f', 'output_format', 
-              type=click.Choice(['srt', 'vtt', 'json']), 
-              default=None, help='Output format')
+              type=click.Choice(['txt', 'srt', 'vtt', 'json']), 
+              default=None, help='Output format (default: txt for transcribe, srt otherwise)')
 @click.option('--whisper-model', '-w', 
               type=click.Choice(['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3']),
               default=None, help='Whisper model to use')
@@ -44,14 +49,15 @@ def cli(verbose: bool, quiet: bool) -> None:
 @click.option('--speaker-label-prefix', '--speaker-label',
               type=str,
               help='Prefix for speaker labels (default: value from config)')
-@click.option('--min-speakers', type=int, help='Minimum number of speakers')
-@click.option('--max-speakers', type=int, help='Maximum number of speakers')
+@click.option('--min-speakers', type=int, help='Minimum number of speakers (diarize mode only)')
+@click.option('--max-speakers', type=int, help='Maximum number of speakers (diarize mode only)')
 @click.option('--device', type=click.Choice(['cpu', 'cuda', 'mps']), 
               help='Device to run models on')
 @click.option('--config', type=click.Path(exists=True, path_type=Path), 
               help='Configuration file path')
 def process(
     input_file: Path,
+    mode: Optional[str],
     output: Optional[Path],
     output_format: Optional[str],
     whisper_model: Optional[str],
@@ -62,8 +68,11 @@ def process(
     device: Optional[str],
     config: Optional[Path]
 ) -> None:
-    """Process an audio file with speaker diarization and speech recognition."""
+    """Process an audio file (transcription, timestamps, and/or speaker diarization)."""
     try:
+        # Imported here so `info`/`models`/`setup` don't pay for loading torch.
+        from .pipeline import SpeechPipeline
+
         # Load configuration
         if config:
             pipeline_config = Config.from_env(str(config))
@@ -71,6 +80,8 @@ def process(
             pipeline_config = Config.from_env()
         
         # Override config with command-line options
+        if mode:
+            pipeline_config.mode = mode
         if whisper_model:
             pipeline_config.whisper_model = whisper_model
         if output_format:
@@ -88,8 +99,11 @@ def process(
         )
         
         # Determine output path
+        resolved_format = pipeline_config.effective_output_format()
         if output is None:
-            output = input_file.with_suffix(f'.{pipeline_config.output_format}')
+            output = input_file.with_suffix(f'.{resolved_format}')
+        elif output.suffix.lower() != f'.{resolved_format}':
+            output = output.with_suffix(f'.{resolved_format}')
         
         # Process audio
         logger.info(f"Processing {input_file}...")
@@ -98,16 +112,22 @@ def process(
             min_speakers=min_speakers if min_speakers is not None else pipeline_config.min_speakers,
             max_speakers=max_speakers if max_speakers is not None else pipeline_config.max_speakers,
             output_path=str(output),
-            output_format=pipeline_config.output_format
+            output_format=resolved_format
         )
         
         # Print summary
         click.echo(f"\n✅ Processing completed!")
+        click.echo(f"🧭 Mode: {pipeline.config.mode}")
         click.echo(f"📁 Input: {input_file}")
         click.echo(f"📄 Output: {output}")
         click.echo(f"🤖 Whisper model: {pipeline.config.whisper_model}")
-        click.echo(f"🎭 Pyannote model: {pipeline.config.pyannote_model}")
         click.echo(f"⏱️  Duration: {result.total_duration:.2f}s")
+        click.echo(f"🧩 Segments: {len(result.segments)}")
+
+        if pipeline.config.mode != MODE_DIARIZE:
+            return
+
+        click.echo(f"🎭 Pyannote model: {pipeline.config.pyannote_model}")
         click.echo(f"👥 Speakers: {len(result.speakers)}")
         
         # Show speaker statistics
@@ -164,7 +184,7 @@ def models() -> None:
     for name, size, desc in whisper_models:
         click.echo(f"  {name:10} {size:10} - {desc}")
     
-    click.echo("\n🎭 Pyannote Models:")
+    click.echo("\n🎭 Pyannote Models (diarize mode only):")
     click.echo("  pyannote/speaker-diarization-3.1 - Latest speaker diarization model")
     click.echo("  (Requires Hugging Face token and license acceptance)")
 
@@ -179,21 +199,25 @@ def setup() -> None:
     click.echo("   uv sync")
     click.echo("   uv sync --group dev  # optional: add developer tools")
 
-    click.echo("\n2. Get Hugging Face token:")
+    click.echo("\n2. (diarize mode only) Get Hugging Face token:")
+    click.echo("   • Skip this step if you only need --mode transcribe or --mode timestamps")
     click.echo("   • Go to https://huggingface.co/")
     click.echo("   • Create account and get access token")
     click.echo("   • Accept license at https://huggingface.co/pyannote/speaker-diarization-3.1")
     
     click.echo("\n3. Create .env file:")
     click.echo("   cp .env.example .env")
-    click.echo("   # Edit .env and add your HUGGINGFACE_TOKEN")
+    click.echo("   # Optional: set PIPELINE_MODE (transcribe | timestamps | diarize)")
+    click.echo("   # For diarize mode, add your HUGGINGFACE_TOKEN")
     
     click.echo("\n4. Test installation:")
     click.echo("   uv run speech-pipeline models")
     click.echo("   uv run speech-pipeline info your_audio_file.wav")
     
     click.echo("\n5. Process audio:")
-    click.echo("   uv run speech-pipeline process input.wav --output output.srt")
+    click.echo("   uv run speech-pipeline process input.wav --mode transcribe   # text only")
+    click.echo("   uv run speech-pipeline process input.wav --mode timestamps   # subtitles, no speakers")
+    click.echo("   uv run speech-pipeline process input.wav --output output.srt # full pipeline")
     click.echo("   # Or try the demo: uv run python quickstart.py --demo")
     
     click.echo("\n📚 For more info, see README.md")
