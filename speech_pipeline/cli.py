@@ -1,6 +1,7 @@
 """Command-line interface for the speech pipeline."""
 
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Optional
@@ -68,8 +69,10 @@ def process(
     device: Optional[str],
     config: Optional[Path]
 ) -> None:
-    """Process an audio file (transcription, timestamps, and/or speaker diarization)."""
+    """Process an audio or video file (transcription, timestamps, and/or speakers)."""
     try:
+        from .media_utils import preflight_media
+        preflight_media(input_file)
         # Imported here so `info`/`models`/`setup` don't pay for loading torch.
         from .pipeline import SpeechPipeline
 
@@ -143,19 +146,76 @@ def process(
 
 
 @cli.command()
+@click.argument('input_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option('--output-dir', type=click.Path(file_okay=False, path_type=Path))
+@click.option('--mode', type=click.Choice(list(PIPELINE_MODES)), default=None)
+@click.option('--chunk-length', type=click.FloatRange(min=0, min_open=True), default=60.0, show_default=True)
+@click.option('--min-speakers', type=int)
+@click.option('--max-speakers', type=int)
+@click.option('--device', type=click.Choice(['cpu', 'cuda', 'mps']))
+def batch(
+    input_dir: Path,
+    output_dir: Optional[Path],
+    mode: Optional[str],
+    chunk_length: float,
+    min_speakers: Optional[int],
+    max_speakers: Optional[int],
+    device: Optional[str],
+) -> None:
+    """Process supported audio/video files in INPUT_DIR (non-recursively)."""
+    from .batch import discover_inputs, output_names, process_in_chunks
+    from .ffmpeg_utils import ensure_ffmpeg
+    from .media_utils import preflight_media
+
+    try:
+        if not math.isfinite(chunk_length):
+            raise ValueError("Chunk length must be finite")
+        inputs = discover_inputs(input_dir)
+        if not inputs:
+            raise ValueError(f"No supported audio/video files found in {input_dir}")
+        config = Config.from_env()
+        if mode:
+            config.mode = mode
+        config.output_format = 'txt' if config.mode == 'transcribe' else 'srt'
+        config.validate()
+        ensure_ffmpeg()
+        for source in inputs:
+            preflight_media(source)
+        from .pipeline import SpeechPipeline
+        pipeline = SpeechPipeline(config=config, device=device)
+        destination = (output_dir or input_dir / 'output') / f'final_{config.output_format}'
+        destination.mkdir(parents=True, exist_ok=True)
+        for source, name in zip(inputs, output_names(inputs, config.output_format)):
+            output = destination / name
+            click.echo(f"Processing {source.name}")
+            process_in_chunks(
+                pipeline, source, output, chunk_length, config.output_format,
+                min_speakers if min_speakers is not None else config.min_speakers,
+                max_speakers if max_speakers is not None else config.max_speakers,
+            )
+            click.echo(f"Saved {output}")
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
 @click.argument('input_file', type=click.Path(exists=True, path_type=Path))
 def info(input_file: Path) -> None:
-    """Get information about an audio file."""
+    """Get information about an audio or video file."""
     try:
         from .audio_utils import AudioProcessor
+        from .media_utils import VIDEO_EXTENSIONS, probe_media
         
         processor = AudioProcessor()
         
-        if not processor.validate_audio_format(str(input_file)):
-            click.echo(f"❌ Invalid audio file: {input_file}")
-            sys.exit(1)
-        
-        duration = processor.get_audio_duration(str(input_file))
+        if input_file.suffix.lower() in VIDEO_EXTENSIONS:
+            metadata = probe_media(input_file)
+            duration = metadata.duration
+            click.echo(f"Audio tracks: {len(metadata.audio_streams)}; selected stream: {metadata.selected_stream}")
+        else:
+            if not processor.validate_audio_format(str(input_file)):
+                raise ValueError(f"Invalid audio file: {input_file}")
+            duration = processor.get_audio_duration(str(input_file))
         
         click.echo(f"📁 File: {input_file}")
         click.echo(f"⏱️  Duration: {duration:.2f}s ({duration/60:.1f} minutes)")

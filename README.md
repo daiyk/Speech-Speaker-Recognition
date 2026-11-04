@@ -9,6 +9,8 @@ A complete pipeline for speech recognition and speaker diarization using Whisper
 - **Speech Recognition**: Uses OpenAI Whisper for accurate transcription
 - **Multiple Output Formats**: Supports TXT, SRT, VTT, and JSON output formats
 - **Local Processing**: Runs entirely on your local machine
+- **Video Input**: Transcribe the first audio track of MP4, MKV, MOV, AVI, and WebM files, with subtitles aligned to the video timeline
+- **Automatic FFmpeg Setup**: Reuses installed FFmpeg/FFprobe or installs missing tools through an available package manager
 - **Cross-platform**: Works on both PC and Mac
 - **Package Management**: Uses uv for fast and reliable dependency management
 
@@ -121,6 +123,65 @@ Then simply run:
    - `MAX_SPEAKERS`: Maximum expected speakers (leave empty for auto-detection)
 
 ## Usage
+
+### Audio and video input
+
+The `process`, `info`, and `quickstart.py` entry points accept video files as well as audio files:
+
+```bash
+uv run speech-pipeline process meeting.mp4 --mode timestamps
+uv run speech-pipeline process meeting.mkv --mode diarize
+uv run speech-pipeline info meeting.mov
+uv run python quickstart.py meeting.webm --mode transcribe
+```
+
+Supported video containers are `.mp4`, `.mkv`, `.mov`, `.avi`, and `.webm` (case-insensitive).
+Actual codec support depends on the installed FFmpeg build. The first audio track in stream order
+is selected, even when another track is marked as the default. Track selection is not yet configurable.
+Videos without audio or with unreadable streams fail with an explanatory error.
+
+Video audio is decoded into a temporary mono, 16 kHz PCM WAV. Leading/trailing silence is retained
+so timestamps follow the video's playback timeline. The temporary WAV is removed after processing,
+including when processing fails. Outputs use the original input filename (`meeting.mp4` → `meeting.srt`).
+This processes the soundtrack; it does not analyze video frames or burn subtitles into the video.
+
+FFmpeg **and FFprobe** are checked before loading speech models for video inputs. If either is missing,
+the application automatically attempts installation using WinGet (or Chocolatey) on Windows,
+Homebrew on macOS, or APT/DNF/YUM/Pacman/APK on Linux. Working installations are reused without upgrading.
+The setup scripts perform the same check. To run it separately:
+
+```bash
+uv run python -m speech_pipeline.ffmpeg_utils
+```
+
+Automatic installation requires network access and an available package manager. System package
+installation may require administrator permissions; Linux uses noninteractive `sudo` when necessary.
+If installation cannot proceed, the application reports the cause and asks you to install FFmpeg
+manually and add its `bin` directory to `PATH`. Each installer command has a 10-minute timeout.
+Normal WAV processing does not require FFmpeg. No additional `.env` settings are needed.
+
+### Batch audio and video processing
+
+```bash
+uv run speech-pipeline batch ./inputs --output-dir ./outputs --mode timestamps --chunk-length 60
+```
+
+The batch command scans the input directory non-recursively for supported audio/video files,
+loads the speech models once, and decodes each file into WAV chunks. Outputs are saved under
+`outputs/final_srt` (or `outputs/final_txt` in `transcribe` mode). Without `--output-dir`,
+the destination is `<input directory>/output`. Chunk length defaults to 60 seconds.
+Batch output is TXT for `transcribe` and SRT for the other modes, regardless of `OUTPUT_FORMAT`.
+
+Filenames with spaces and Unicode are supported. When input stems collide, filenames retain
+their input extension, for example `meeting.mp3.srt` and `meeting.mp4.srt`; additional collisions
+receive numeric suffixes. Subtitle offsets are calculated from decoded sample counts, including
+the final partial chunk. Speaker identities are determined independently within each chunk;
+the same label across chunks does not guarantee the same person. A failed input stops the batch;
+outputs already completed remain available. Existing output files are overwritten on reruns.
+
+`run_pipeline.sh` delegates to this command and retains its six positional arguments:
+input directory, output directory, minimum speakers, maximum speakers, chunk length, and mode.
+Its default speaker constraints remain 2–3; the direct batch CLI uses the environment configuration.
 
 ### Command Line Interface
 

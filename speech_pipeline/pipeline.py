@@ -183,6 +183,28 @@ class SpeechPipeline:
         max_speakers: Optional[int] = None,
         output_path: Optional[str] = None,
         output_format: Optional[str] = None,
+        diarization_output_path: Optional[str] = "",
+        diarization_output_format: str = "txt",
+    ) -> TranscriptionResult:
+        """Process audio or the first audio track of a video, using its timeline."""
+        from .media_utils import prepared_audio
+
+        source = Path(audio_path)
+        if diarization_output_path is None:
+            diarization_output_path = str(source.parent / f"{source.stem}_diarization")
+        with prepared_audio(source) as prepared:
+            return self._process_audio(
+                str(prepared), min_speakers, max_speakers, output_path,
+                output_format, diarization_output_path, diarization_output_format,
+            )
+
+    def _process_audio(
+        self,
+        audio_path: str,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+        output_path: Optional[str] = None,
+        output_format: Optional[str] = None,
         diarization_output_path: Optional[str] = "",  # disable diarization saving by default
         diarization_output_format: str = "txt"
     ) -> TranscriptionResult:

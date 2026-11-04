@@ -61,6 +61,7 @@ Thumbs.db
 *.avi
 *.mov
 *.mkv
+*.webm
 output_transcriptions/
 input_audio/
 temp/

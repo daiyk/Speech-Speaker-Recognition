@@ -26,6 +26,11 @@ uv sync
 REM Install development dependencies
 echo 📦 Installing development dependencies...
 uv sync --group dev
+if errorlevel 1 exit /b 1
+
+REM Verify/install shared media tools, including ffprobe.
+uv run python -m speech_pipeline.ffmpeg_utils
+if errorlevel 1 exit /b 1
 
 REM Check for .env file
 if not exist ".env" (
