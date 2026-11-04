@@ -84,7 +84,7 @@ Then simply run:
    HUGGINGFACE_TOKEN=your_token_here
    
    # Optional
-   WHISPER_MODEL=base                                    # Default: base
+   WHISPER_MODEL=large-v3                                # Default: large-v3
    PYANNOTE_MODEL=pyannote/speaker-diarization-3.1      # Default: pyannote/speaker-diarization-3.1 (diarize only)
    OUTPUT_FORMAT=                                        # Default: txt for transcribe, srt otherwise (options: txt, srt, vtt, json)
    SPEAKER_LABELS=Speaker                                # Default: Speaker (diarize only)
@@ -172,7 +172,7 @@ from speech_pipeline import SpeechPipeline
 
 # Initialize pipeline
 pipeline = SpeechPipeline(
-    whisper_model="base",
+    whisper_model="large-v3",
     device="cpu",      # or "cuda", "mps"
     mode="diarize",    # or "transcribe" / "timestamps" (no Hugging Face token needed)
 )
