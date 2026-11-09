@@ -2,6 +2,7 @@
 
 import logging
 import math
+import sys
 import warnings
 from collections import defaultdict
 from pathlib import Path
@@ -19,7 +20,8 @@ try:
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
-    from faster_whisper import WhisperModel
+    from faster_whisper import WhisperModel, download_model
+    from huggingface_hub import constants as hf_constants
     # Lightweight data structures only; pyannote.audio (the diarization model
     # stack) is imported lazily, and only when diarization is enabled.
     from pyannote.core import Annotation, Segment
@@ -38,6 +40,22 @@ from .audio_utils import AudioProcessor
 
 
 logger = logging.getLogger(__name__)
+
+
+def _whisper_model_source(model_name: str) -> str:
+    """Return the name or local path to pass to ``WhisperModel``.
+
+    Windows users without admin rights or Developer Mode can't create symlinks.
+    huggingface_hub should fall back to copying, but before 2.0 its symlink check
+    races across download threads and can crash with WinError 1314. Downloading
+    to a plain folder never creates symlinks.
+    """
+    if sys.platform != "win32":
+        return model_name
+
+    model_dir = Path(hf_constants.HF_HOME) / "faster-whisper" / model_name
+    logger.info(f"Using Windows model folder: {model_dir}")
+    return download_model(model_name, output_dir=str(model_dir))
 
 
 class SpeechPipeline:
@@ -136,7 +154,7 @@ class SpeechPipeline:
                     logger.info("MPS selected: Whisper will run on CPU backend (faster-whisper currently lacks native MPS support).")
 
             self.whisper_model = WhisperModel(
-                self.config.whisper_model,
+                _whisper_model_source(self.config.whisper_model),
                 device=whisper_device,
                 compute_type=compute_type
             )

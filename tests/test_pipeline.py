@@ -259,7 +259,37 @@ class TestSpeechPipeline:
         config.huggingface_token = "test_token"
         config.whisper_model = "base"
         return config
-    
+
+    @pytest.fixture(autouse=True)
+    def no_real_model_download(self):
+        """Keep the Windows model download out of tests that run on Windows."""
+        with patch('speech_pipeline.pipeline.download_model', return_value="model-dir") as mock_download:
+            yield mock_download
+
+    def test_windows_loads_whisper_from_plain_folder(self, no_real_model_download):
+        """Windows avoids the symlinked Hugging Face cache for Whisper models."""
+        from speech_pipeline.pipeline import SpeechPipeline
+
+        with patch('speech_pipeline.pipeline.sys', Mock(platform="win32")), \
+             patch('speech_pipeline.pipeline.WhisperModel') as mock_whisper_cls:
+            SpeechPipeline(config=Config(mode="transcribe"), device="cpu")
+
+        args, kwargs = no_real_model_download.call_args
+        assert args == ("base",)
+        assert Path(kwargs["output_dir"]).parts[-2:] == ("faster-whisper", "base")
+        assert mock_whisper_cls.call_args.args == ("model-dir",)
+
+    def test_non_windows_loads_whisper_by_name(self, no_real_model_download):
+        """Other platforms keep using the normal Hugging Face cache."""
+        from speech_pipeline.pipeline import SpeechPipeline
+
+        with patch('speech_pipeline.pipeline.sys', Mock(platform="darwin")), \
+             patch('speech_pipeline.pipeline.WhisperModel') as mock_whisper_cls:
+            SpeechPipeline(config=Config(mode="transcribe"), device="cpu")
+
+        no_real_model_download.assert_not_called()
+        assert mock_whisper_cls.call_args.args == ("base",)
+
     @patch('pyannote.audio.Pipeline.from_pretrained')
     @patch('speech_pipeline.pipeline.WhisperModel')
     def test_pipeline_initialization(self, mock_whisper_cls, mock_pyannote_from_pretrained, mock_config):
