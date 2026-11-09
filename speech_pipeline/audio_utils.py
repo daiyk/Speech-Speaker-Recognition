@@ -163,7 +163,8 @@ class AudioProcessor:
                 return False
             
             # Check file extension
-            valid_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.aac', '.wma'}
+            from .media_utils import AUDIO_EXTENSIONS
+            valid_extensions = AUDIO_EXTENSIONS
             if audio_file.suffix.lower() not in valid_extensions:
                 logger.warning(f"Unsupported audio format: {audio_file.suffix}")
                 return False

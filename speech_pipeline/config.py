@@ -38,7 +38,7 @@ class Config:
     openai_api_key: Optional[str] = None
 
     # Model configurations
-    whisper_model: str = "base"
+    whisper_model: str = "large-v3"
     pyannote_model: str = "pyannote/speaker-diarization-3.1"
 
     # Processing settings
@@ -68,7 +68,7 @@ class Config:
             mode=(os.getenv("PIPELINE_MODE") or DEFAULT_MODE).strip().lower(),
             huggingface_token=os.getenv("HUGGINGFACE_TOKEN") or None,
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
-            whisper_model=os.getenv("WHISPER_MODEL") or "base",
+            whisper_model=os.getenv("WHISPER_MODEL") or "large-v3",
             pyannote_model=os.getenv("PYANNOTE_MODEL") or "pyannote/speaker-diarization-3.1",
             output_format=(os.getenv("OUTPUT_FORMAT") or "").strip().lower() or None,
             speaker_labels=os.getenv("SPEAKER_LABELS") or "Speaker",

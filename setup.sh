@@ -36,6 +36,9 @@ uv sync
 echo "📦 Installing development dependencies..."
 uv sync --group dev
 
+# Verify/install shared media tools, including ffprobe.
+uv run python -m speech_pipeline.ffmpeg_utils
+
 # Check for .env file
 if [ ! -f ".env" ]; then
     echo "📝 Creating .env file from template..."

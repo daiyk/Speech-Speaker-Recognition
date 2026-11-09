@@ -18,7 +18,7 @@ class TestConfig:
         """Test default configuration values."""
         config = Config()
         assert config.mode == "diarize"
-        assert config.whisper_model == "base"
+        assert config.whisper_model == "large-v3"
         assert config.pyannote_model == "pyannote/speaker-diarization-3.1"
         assert config.output_format is None
         assert config.effective_output_format() == "srt"

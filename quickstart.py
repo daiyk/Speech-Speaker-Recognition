@@ -45,7 +45,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "input",
         nargs="?",
-        help="Path to an audio file. Required unless -demo/--demo is specified.",
+        help="Path to an audio or video file. Required unless -demo/--demo is specified.",
     )
     parser.add_argument(
         "-o",
@@ -253,6 +253,17 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     if not check_dependencies(need_diarization=config.diarization_enabled):
         return
+
+    if not args.demo:
+        from speech_pipeline.media_utils import preflight_media
+        if args.input is None:
+            logger.error("No input provided. Pass an audio/video file or use --demo.")
+            return
+        try:
+            preflight_media(Path(args.input).expanduser())
+        except (ValueError, RuntimeError, OSError) as exc:
+            logger.error("Cannot process input: %s", exc)
+            return
 
     pipeline = bootstrap_pipeline(config, demo_mode=args.demo)
     if pipeline is None:
