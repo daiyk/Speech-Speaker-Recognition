@@ -513,13 +513,18 @@ class SpeechPipeline:
             raise RuntimeError("Whisper model not loaded")
 
         try:
-            whisper_segments, _ = self.whisper_model.transcribe(
+            # vad_filter drops silence/non-speech before language detection and
+            # decoding; faster-whisper maps timestamps back to the original audio.
+            whisper_segments, info = self.whisper_model.transcribe(
                 audio_path,
                 language=None,
                 word_timestamps=word_timestamps,
+                vad_filter=True,
             )
         except Exception as exc:  # pragma: no cover - safety belt
             raise RuntimeError(f"Failed to transcribe audio: {exc}") from exc
+
+        self._log_detected_language(info)
 
         processed_segments: List[Dict[str, Any]] = []
         for raw_segment in whisper_segments:
@@ -555,6 +560,24 @@ class SpeechPipeline:
             )
 
         return processed_segments
+
+    @staticmethod
+    def _log_detected_language(info: Any) -> None:
+        """Log Whisper's language detection so misdetections are visible."""
+        language = getattr(info, "language", None)
+        if language is None:
+            return
+        probability = getattr(info, "language_probability", None)
+        if probability is None:
+            logger.info("Detected language: %s", language)
+            return
+        logger.info("Detected language: %s (probability %.2f)", language, probability)
+        if probability < 0.5:
+            logger.warning(
+                "Low language-detection confidence (%.2f); the transcript may be "
+                "in the wrong language.",
+                probability,
+            )
 
     @staticmethod
     def _segments_without_speakers(

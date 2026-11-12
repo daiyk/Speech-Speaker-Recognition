@@ -275,8 +275,8 @@ class TestSpeechPipeline:
             SpeechPipeline(config=Config(mode="transcribe"), device="cpu")
 
         args, kwargs = no_real_model_download.call_args
-        assert args == ("base",)
-        assert Path(kwargs["output_dir"]).parts[-2:] == ("faster-whisper", "base")
+        assert args == ("large-v3",)
+        assert Path(kwargs["output_dir"]).parts[-2:] == ("faster-whisper", "large-v3")
         assert mock_whisper_cls.call_args.args == ("model-dir",)
 
     def test_non_windows_loads_whisper_by_name(self, no_real_model_download):
@@ -288,7 +288,7 @@ class TestSpeechPipeline:
             SpeechPipeline(config=Config(mode="transcribe"), device="cpu")
 
         no_real_model_download.assert_not_called()
-        assert mock_whisper_cls.call_args.args == ("base",)
+        assert mock_whisper_cls.call_args.args == ("large-v3",)
 
     @patch('pyannote.audio.Pipeline.from_pretrained')
     @patch('speech_pipeline.pipeline.WhisperModel')
@@ -373,6 +373,7 @@ class TestSpeechPipeline:
         assert pipeline.get_model_info()["pyannote_model"] is None
         _, kwargs = mock_whisper_cls.return_value.transcribe.call_args
         assert kwargs["word_timestamps"] is False
+        assert kwargs["vad_filter"] is True
 
         assert result.speakers == []
         assert [s.speaker for s in result.segments] == [None, None]
