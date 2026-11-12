@@ -52,10 +52,15 @@ def cli(verbose: bool, quiet: bool) -> None:
               help='Prefix for speaker labels (default: value from config)')
 @click.option('--min-speakers', type=int, help='Minimum number of speakers (diarize mode only)')
 @click.option('--max-speakers', type=int, help='Maximum number of speakers (diarize mode only)')
-@click.option('--device', type=click.Choice(['cpu', 'cuda', 'mps']), 
+@click.option('--device', type=click.Choice(['cpu', 'cuda', 'mps']),
               help='Device to run models on')
-@click.option('--config', type=click.Path(exists=True, path_type=Path), 
+@click.option('--config', type=click.Path(exists=True, path_type=Path),
               help='Configuration file path')
+@click.option('--start', type=click.FloatRange(min=0), default=0.0,
+              help='Start processing at this many seconds into the media (default: 0)')
+@click.option('--duration', '-d', type=click.FloatRange(min=0, min_open=True), default=None,
+              help='Only process this many seconds (default: until the end). '
+                   'Output timestamps still match the original media.')
 def process(
     input_file: Path,
     mode: Optional[str],
@@ -67,11 +72,14 @@ def process(
     min_speakers: Optional[int],
     max_speakers: Optional[int],
     device: Optional[str],
-    config: Optional[Path]
+    config: Optional[Path],
+    start: float,
+    duration: Optional[float],
 ) -> None:
     """Process an audio or video file (transcription, timestamps, and/or speakers)."""
     try:
-        from .media_utils import preflight_media
+        from .media_utils import preflight_media, validate_clip
+        validate_clip(start, duration)
         preflight_media(input_file)
         # Imported here so `info`/`models`/`setup` don't pay for loading torch.
         from .pipeline import SpeechPipeline
@@ -115,7 +123,9 @@ def process(
             min_speakers=min_speakers if min_speakers is not None else pipeline_config.min_speakers,
             max_speakers=max_speakers if max_speakers is not None else pipeline_config.max_speakers,
             output_path=str(output),
-            output_format=resolved_format
+            output_format=resolved_format,
+            start=start,
+            duration=duration,
         )
         
         # Print summary
@@ -124,6 +134,8 @@ def process(
         click.echo(f"📁 Input: {input_file}")
         click.echo(f"📄 Output: {output}")
         click.echo(f"🤖 Whisper model: {pipeline.config.whisper_model}")
+        if start or duration is not None:
+            click.echo(f"✂️  Clip: {start:g}s to {start + result.total_duration:.2f}s")
         click.echo(f"⏱️  Duration: {result.total_duration:.2f}s")
         click.echo(f"🧩 Segments: {len(result.segments)}")
 

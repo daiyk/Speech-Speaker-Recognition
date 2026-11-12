@@ -382,6 +382,54 @@ class TestSpeechPipeline:
         out_file = (tmp_path / "out").with_suffix(expected_suffix)
         assert expected_text in out_file.read_text()
 
+    def test_clip_processes_only_requested_part(self, tmp_path):
+        """--start/--duration feed Whisper a clip and keep the original timeline."""
+        import soundfile as sf
+        from speech_pipeline.pipeline import SpeechPipeline
+
+        audio = self._write_wav(tmp_path / "in.wav")  # 3 s
+        whisper = self._fake_whisper()
+        clip_lengths = []
+        segments = whisper.transcribe.return_value[0]
+
+        def transcribe(path, **kwargs):
+            clip_lengths.append(sf.info(path).duration)
+            return segments, {}
+
+        whisper.transcribe.side_effect = transcribe
+        with patch('speech_pipeline.pipeline.WhisperModel', return_value=whisper):
+            pipeline = SpeechPipeline(config=Config(mode="timestamps"), device="cpu")
+            result = pipeline.process(
+                str(audio), output_path=str(tmp_path / "out"), output_format="srt",
+                start=1.0, duration=1.25,
+            )
+
+        assert clip_lengths == [pytest.approx(1.25)]
+        assert result.total_duration == pytest.approx(1.25)
+        assert [(s.start, s.end) for s in result.segments] == [(1.0, 2.5), (2.5, 3.5)]
+        assert "00:00:01,000 --> 00:00:02,500" in (tmp_path / "out.srt").read_text()
+
+    def test_clip_duration_past_end_is_truncated(self, tmp_path):
+        from speech_pipeline.media_utils import clipped_audio
+        import soundfile as sf
+
+        audio = self._write_wav(tmp_path / "in.wav")  # 3 s
+        with clipped_audio(audio, start=2.0, duration=10.0) as clip:
+            assert sf.info(str(clip)).duration == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("start,duration,message", [
+        (5.0, None, "beyond the end"),
+        (-1.0, None, "start"),
+        (0.0, 0.0, "duration"),
+    ])
+    def test_clip_rejects_invalid_ranges(self, tmp_path, start, duration, message):
+        from speech_pipeline.media_utils import clipped_audio
+
+        audio = self._write_wav(tmp_path / "in.wav")
+        with pytest.raises(ValueError, match=message):
+            with clipped_audio(audio, start=start, duration=duration):
+                pass
+
     def test_mode_override_argument(self, mock_config):
         with patch('speech_pipeline.pipeline.WhisperModel'), \
              patch('pyannote.audio.Pipeline.from_pretrained') as mock_pyannote_from_pretrained:

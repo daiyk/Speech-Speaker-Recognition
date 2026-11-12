@@ -5,6 +5,7 @@ import math
 import sys
 import warnings
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -203,17 +204,32 @@ class SpeechPipeline:
         output_format: Optional[str] = None,
         diarization_output_path: Optional[str] = "",
         diarization_output_format: str = "txt",
+        start: float = 0.0,
+        duration: Optional[float] = None,
     ) -> TranscriptionResult:
-        """Process audio or the first audio track of a video, using its timeline."""
-        from .media_utils import prepared_audio
+        """Process audio or the first audio track of a video, using its timeline.
+
+        ``start``/``duration`` (seconds) limit processing to one part of the
+        media; output timestamps still refer to the original timeline.
+        """
+        from .media_utils import clipped_audio, prepared_audio
 
         source = Path(audio_path)
         if diarization_output_path is None:
             diarization_output_path = str(source.parent / f"{source.stem}_diarization")
-        with prepared_audio(source) as prepared:
+        if start == 0 and duration is None:
+            with prepared_audio(source) as prepared:
+                return self._process_audio(
+                    str(prepared), min_speakers, max_speakers, output_path,
+                    output_format, diarization_output_path, diarization_output_format,
+                )
+        with clipped_audio(source, start, duration) as clip:
+            end = "end" if duration is None else f"{start + duration:g}s"
+            logger.info("Processing only %gs to %s of %s", start, end, source.name)
             return self._process_audio(
-                str(prepared), min_speakers, max_speakers, output_path,
+                str(clip), min_speakers, max_speakers, output_path,
                 output_format, diarization_output_path, diarization_output_format,
+                time_offset=start,
             )
 
     def _process_audio(
@@ -224,7 +240,8 @@ class SpeechPipeline:
         output_path: Optional[str] = None,
         output_format: Optional[str] = None,
         diarization_output_path: Optional[str] = "",  # disable diarization saving by default
-        diarization_output_format: str = "txt"
+        diarization_output_format: str = "txt",
+        time_offset: float = 0.0,
     ) -> TranscriptionResult:
         """
         Process an audio file according to the configured mode.
@@ -237,7 +254,8 @@ class SpeechPipeline:
             output_format: Transcription output format ('txt', 'srt', 'vtt', 'json')
             diarization_output_path: Directory or base path for diarization output (if None, automatically saved next to audio)
             diarization_output_format: 'txt' (default), 'rttm', or 'json'
-            
+            time_offset: Seconds added to every output timestamp (clip start)
+
         Returns:
             TranscriptionResult object
         """
@@ -257,6 +275,7 @@ class SpeechPipeline:
                 max_speakers,
                 diarization_output_path,
                 diarization_output_format,
+                time_offset,
             )
         else:
             if min_speakers is not None or max_speakers is not None:
@@ -264,6 +283,12 @@ class SpeechPipeline:
             logger.info("Performing speech recognition...")
             whisper_segments = self._transcribe_audio(audio_path, word_timestamps=False)
             transcribed_segments = self._segments_without_speakers(whisper_segments)
+
+        if time_offset:
+            transcribed_segments = [
+                replace(s, start=s.start + time_offset, end=s.end + time_offset)
+                for s in transcribed_segments
+            ]
 
         # Create result
         speakers = sorted({s.speaker for s in transcribed_segments if s.speaker})
@@ -291,6 +316,7 @@ class SpeechPipeline:
         max_speakers: Optional[int],
         diarization_output_path: Optional[str],
         diarization_output_format: str,
+        time_offset: float = 0.0,
     ) -> List[SpeakerSegment]:
         """Full pipeline: diarization + word-level transcription + speaker merge."""
         # Perform speaker diarization
@@ -318,6 +344,7 @@ class SpeechPipeline:
                     audio_path=audio_path,
                     output_path=diarization_output_path,
                     fmt=diarization_output_format,
+                    time_offset=time_offset,
                 )
             except Exception as e:  # pragma: no cover - non critical
                 logger.warning(f"Failed to save diarization output: {e}")
@@ -965,7 +992,8 @@ class SpeechPipeline:
         diarization: Annotation,
         audio_path: str,
         output_path: str,
-        fmt: str = "rttm"
+        fmt: str = "rttm",
+        time_offset: float = 0.0,
     ) -> None:
         """Save raw diarization annotation.
 
@@ -996,8 +1024,8 @@ class SpeechPipeline:
                 label = "Unknown"
             segments.append(
                 {
-                    "start": float(segment.start),
-                    "end": float(segment.end),
+                    "start": float(segment.start) + time_offset,
+                    "end": float(segment.end) + time_offset,
                     "duration": float(segment.duration),
                     "speaker": str(label),
                 }

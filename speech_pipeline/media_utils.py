@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 
 import soundfile as sf
 
@@ -16,6 +16,8 @@ from .ffmpeg_utils import ensure_ffmpeg
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".wma"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
+# Audio formats soundfile can seek in directly, so clipping needs no FFmpeg.
+SOUNDFILE_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3"}
 
 
 @dataclass(frozen=True)
@@ -139,4 +141,45 @@ def prepared_audio(path: Path, force: bool = False) -> Iterator[Path]:
                 raise ValueError("Decoded audio is empty or invalid")
         except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
             raise ValueError(f"Cannot extract audio from '{path}': {exc}") from exc
+        yield output
+
+
+def validate_clip(start: float, duration: Optional[float]) -> None:
+    if not math.isfinite(start) or start < 0:
+        raise ValueError("Clip start must be a finite number of seconds >= 0")
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
+        raise ValueError("Clip duration must be a finite number of seconds > 0")
+
+
+@contextmanager
+def clipped_audio(
+    path: Path, start: float = 0.0, duration: Optional[float] = None
+) -> Iterator[Path]:
+    """Yield a WAV holding only ``[start, start + duration)`` of the media.
+
+    Timestamps in the clip start at zero; callers add ``start`` back to map
+    results onto the original timeline.
+    """
+    validate_clip(start, duration)
+    force = path.suffix.lower() not in SOUNDFILE_EXTENSIONS
+    with (
+        prepared_audio(path, force=force) as audio,
+        TemporaryDirectory(prefix="speech-clip-") as directory,
+    ):
+        output = Path(directory) / (path.stem + ".wav")
+        with sf.SoundFile(str(audio)) as stream:
+            sample_rate = stream.samplerate
+            total = len(stream)
+            first = round(start * sample_rate)
+            if first >= total:
+                raise ValueError(
+                    f"Clip start {start:g}s is beyond the end of the media "
+                    f"({total / sample_rate:.2f}s)"
+                )
+            frames = total - first
+            if duration is not None:
+                frames = min(frames, max(1, round(duration * sample_rate)))
+            stream.seek(first)
+            data = stream.read(frames, dtype="float32")
+        sf.write(str(output), data, sample_rate, subtype="PCM_16")
         yield output
